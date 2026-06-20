@@ -14,9 +14,9 @@ def actual_forward_return(
     as_of_date: pd.Timestamp,
     horizon: str,
 ) -> float | None:
-    prices = price_history.sort_values("date").reset_index(drop=True)
-    prices["date"] = pd.to_datetime(prices["date"])
-    matches = prices.index[prices["date"] >= pd.Timestamp(as_of_date)]
+    prices = normalize_price_dates(price_history)
+    as_of = normalize_timestamp(as_of_date)
+    matches = prices.index[prices["date"] >= as_of]
     if len(matches) == 0:
         return None
     start_index = int(matches[0])
@@ -41,10 +41,10 @@ def prediction_test_frame(
     if horizon not in TRADING_DAYS:
         raise ValueError(f"Unsupported prediction test horizon: {horizon}")
 
-    prices = price_history.sort_values("date").reset_index(drop=True)
-    prices["date"] = pd.to_datetime(prices["date"])
+    prices = normalize_price_dates(price_history)
+    start = normalize_timestamp(start_date)
     rows = []
-    eligible = prices.index[prices["date"] >= pd.Timestamp(start_date)]
+    eligible = prices.index[prices["date"] >= start]
 
     for index in eligible[::step_days]:
         if index < 63:
@@ -88,6 +88,29 @@ def prediction_test_frame(
             }
         )
     return pd.DataFrame(rows)
+
+
+def normalize_price_dates(price_history: pd.DataFrame) -> pd.DataFrame:
+    prices = price_history.copy()
+    if "date" not in prices.columns:
+        if isinstance(prices.index, pd.DatetimeIndex):
+            prices = prices.reset_index()
+            index_column = prices.columns[0]
+            prices = prices.rename(columns={index_column: "date"})
+        else:
+            raise ValueError("Price history must include a date column or DatetimeIndex.")
+
+    dates = pd.to_datetime(prices["date"], utc=True, errors="coerce")
+    prices["date"] = dates.dt.tz_convert(None)
+    prices = prices.dropna(subset=["date"])
+    return prices.sort_values("date").reset_index(drop=True)
+
+
+def normalize_timestamp(value) -> pd.Timestamp:
+    timestamp = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(timestamp):
+        raise ValueError(f"Invalid date value: {value}")
+    return pd.Timestamp(timestamp).tz_convert(None)
 
 
 def detailed_factor_exposures(score) -> dict[str, float]:

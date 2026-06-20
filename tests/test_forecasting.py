@@ -4,6 +4,7 @@ import pytest
 from tae.connectors.fallback import sample_price_history
 from tae.forecasting.backtest import (
     actual_forward_return,
+    normalize_price_dates,
     prediction_test_frame,
     prediction_test_summary,
 )
@@ -65,3 +66,73 @@ def test_prediction_testing_and_summary_work_in_fallback_mode():
     assert 0 <= summary["hit_rate"] <= 1
     assert "maximum_drawdown" in summary
 
+
+def test_prediction_testing_normalizes_string_dates():
+    prices = sample_price_history(start="2020-01-01", end="2024-12-31")
+    prices["date"] = prices["date"].dt.strftime("%Y-%m-%d")
+
+    frame = prediction_test_frame(
+        "AAPL",
+        prices,
+        start_date="2022-01-01",
+        horizon="1 month",
+        fallback_data_used=True,
+    )
+
+    assert not frame.empty
+    assert frame["date"].dtype.kind == "M"
+
+
+def test_prediction_testing_normalizes_datetime_index():
+    prices = sample_price_history(start="2020-01-01", end="2024-12-31")
+    prices = prices.set_index("date")
+
+    normalized = normalize_price_dates(prices)
+    frame = prediction_test_frame(
+        "MSFT",
+        prices,
+        start_date="2022-01-01",
+        horizon="1 month",
+        fallback_data_used=True,
+    )
+
+    assert "date" in normalized.columns
+    assert not frame.empty
+
+
+def test_prediction_testing_normalizes_timezone_aware_dates():
+    prices = sample_price_history(start="2020-01-01", end="2024-12-31")
+    prices["date"] = prices["date"].dt.tz_localize("UTC")
+
+    actual = actual_forward_return(
+        prices,
+        pd.Timestamp("2022-01-03", tz="Africa/Johannesburg"),
+        "1 month",
+    )
+    frame = prediction_test_frame(
+        "NVDA",
+        prices,
+        start_date=pd.Timestamp("2022-01-01", tz="UTC"),
+        horizon="1 month",
+        fallback_data_used=True,
+    )
+
+    assert actual is not None
+    assert not frame.empty
+
+
+@pytest.mark.parametrize("ticker", ["AAPL", "MSFT", "NVDA"])
+def test_prediction_testing_tab_core_path_for_requested_tickers(ticker):
+    prices = sample_price_history(start="2020-01-01", end="2024-12-31")
+    frame = prediction_test_frame(
+        ticker,
+        prices,
+        start_date="2022-01-01",
+        horizon="1 month",
+        fallback_data_used=True,
+    )
+
+    assert not frame.empty
+    assert {"predicted_return", "actual_return", "error_pct", "hit"}.issubset(
+        frame.columns
+    )
