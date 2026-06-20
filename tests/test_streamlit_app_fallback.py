@@ -69,3 +69,28 @@ def test_streamlit_scoring_path_handles_older_score_signature(monkeypatch):
     assert score.ticker == "AAPL"
     assert quality["fallback_data_used"] is True
     assert quality["fundamental_data_available"] is False
+
+
+def test_prediction_accuracy_dashboard_core_path_runs_with_fallback_data():
+    streamlit_app = load_streamlit_app()
+
+    prices = {
+        ticker: streamlit_app.sample_price_history(start="2013-01-01", end="2026-01-01")
+        for ticker in ["AAPL", "MSFT"]
+    }
+    flags = {ticker: True for ticker in prices}
+    frame = streamlit_app.point_in_time_prediction_frame(
+        prices,
+        start_date="2016-01-01",
+        fallback_data_used_by_ticker=flags,
+        step_days=252,
+    )
+    accuracy = streamlit_app.prediction_accuracy_metrics(frame)
+    threshold = streamlit_app.score_threshold_validation(frame)
+    calibration = streamlit_app.pit_forecast_calibration(frame)
+
+    assert not frame.empty
+    assert "average_prediction_error_pct" in accuracy
+    assert not threshold.empty
+    assert not calibration.empty
+    assert frame["sample_fundamentals_used"].eq(False).all()

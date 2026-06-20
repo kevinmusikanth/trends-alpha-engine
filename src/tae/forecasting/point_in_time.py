@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inspect import signature
+
 import numpy as np
 import pandas as pd
 
@@ -50,13 +52,12 @@ def point_in_time_prediction_frame(
             if index < 126:
                 continue
             historical_prices = prices.iloc[: index + 1].copy()
-            score = score_ticker(
+            score = point_in_time_score_ticker(
                 ticker,
                 historical_prices,
                 manual_features=point_in_time_proxy_features(historical_prices),
                 live_price_data_available=not is_fallback,
                 fallback_data_used=is_fallback,
-                use_sample_fundamentals=False,
             )
             report = build_forecast_report(score, historical_prices)
             as_of_date = prices.loc[index, "date"]
@@ -117,6 +118,31 @@ def point_in_time_prediction_frame(
             ]
         )
     return pd.DataFrame(rows)
+
+
+def point_in_time_score_ticker(
+    ticker: str,
+    historical_prices: pd.DataFrame,
+    manual_features: dict[str, float],
+    live_price_data_available: bool,
+    fallback_data_used: bool,
+):
+    parameters = signature(score_ticker).parameters
+    kwargs = {}
+    ticker_for_call = ticker
+
+    if "manual_features" in parameters:
+        kwargs["manual_features"] = manual_features
+    else:
+        ticker_for_call = f"__PIT__{ticker}"
+    if "live_price_data_available" in parameters:
+        kwargs["live_price_data_available"] = live_price_data_available
+    if "fallback_data_used" in parameters:
+        kwargs["fallback_data_used"] = fallback_data_used
+    if "use_sample_fundamentals" in parameters:
+        kwargs["use_sample_fundamentals"] = False
+
+    return score_ticker(ticker_for_call, historical_prices, **kwargs)
 
 
 def point_in_time_proxy_features(historical_prices: pd.DataFrame) -> dict[str, float]:

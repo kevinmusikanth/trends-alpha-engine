@@ -1,4 +1,5 @@
 from tae.connectors.fallback import sample_price_history
+from tae.scoring.engine import score_ticker as real_score_ticker
 from tae.forecasting.point_in_time import (
     forecast_calibration,
     investment_outcome_validation,
@@ -33,6 +34,38 @@ def test_point_in_time_prediction_frame_uses_only_historical_slices():
         "actual_future_return",
         "prediction_error",
     }.issubset(frame.columns)
+    assert frame["sample_fundamentals_used"].eq(False).all()
+
+
+def test_point_in_time_prediction_frame_handles_older_score_signature(monkeypatch):
+    from tae.forecasting import point_in_time
+
+    def older_score_ticker(
+        ticker,
+        price_history,
+        manual_features=None,
+        live_price_data_available=None,
+        fallback_data_used=False,
+    ):
+        return real_score_ticker(
+            ticker,
+            price_history,
+            manual_features=manual_features,
+            live_price_data_available=live_price_data_available,
+            fallback_data_used=fallback_data_used,
+        )
+
+    monkeypatch.setattr(point_in_time, "score_ticker", older_score_ticker)
+    prices = {"META": sample_price_history(start="2013-01-01", end="2026-01-01")}
+
+    frame = point_in_time_prediction_frame(
+        prices,
+        start_date="2016-01-01",
+        fallback_data_used_by_ticker={"META": True},
+        step_days=252,
+    )
+
+    assert not frame.empty
     assert frame["sample_fundamentals_used"].eq(False).all()
 
 
