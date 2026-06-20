@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from tae.scoring.components import clip
+from tae.scoring.fundamentals import build_feature_set, missing_metrics
 from tae.scoring.models import score_model_a, score_model_b, score_model_c, validate_weights
 
 
@@ -21,6 +22,7 @@ class ScoreResult:
     overall_score: float
     recommendation: str
     components: dict[str, list[dict]]
+    data_quality: dict[str, object]
 
 
 def extract_price_features(price_history: pd.DataFrame) -> dict[str, float | None]:
@@ -67,10 +69,12 @@ def risk_score(features: dict[str, float | None]) -> float:
 
 
 def recommendation(overall_score: float, risk: float) -> str:
-    if overall_score >= 75 and risk <= 55:
+    if overall_score >= 80 and risk <= 55:
+        return "Strong Buy"
+    if overall_score >= 65 and risk <= 65:
         return "Buy"
-    if overall_score >= 55 and risk <= 75:
-        return "Watch"
+    if overall_score >= 45 and risk <= 80:
+        return "Watchlist"
     return "Avoid"
 
 
@@ -78,10 +82,13 @@ def score_ticker(
     ticker: str,
     price_history: pd.DataFrame,
     manual_features: dict[str, float | None] | None = None,
+    live_price_data_available: bool | None = None,
+    fallback_data_used: bool = False,
 ) -> ScoreResult:
     validate_weights()
-    features = extract_price_features(price_history)
-    features.update(manual_features or {})
+    price_features = extract_price_features(price_history)
+    feature_set = build_feature_set(ticker, price_features, manual_features)
+    features = feature_set.values
 
     short_score, short_components = score_model_a(features)
     medium_score, medium_components = score_model_b(features)
@@ -92,10 +99,13 @@ def score_ticker(
     surprise = round(clip(features.get("surprise_score") or 0, 0, 10), 2)
     risk = risk_score(features)
 
-    model_blend = (short_score * 0.3) + (medium_score * 0.35) + (long_score * 0.35)
+    model_blend = (short_score * 0.25) + (medium_score * 0.35) + (long_score * 0.40)
     auxiliary = ((narrative + capital_flow + surprise) / 30) * 10
-    risk_penalty = risk * 0.15
+    risk_penalty = risk * 0.08
     overall = round(clip(model_blend + auxiliary - risk_penalty, 0, 100), 2)
+    missing = missing_metrics(features)
+    if live_price_data_available is None:
+        live_price_data_available = not price_history.empty and not fallback_data_used
 
     return ScoreResult(
         ticker=ticker.upper(),
@@ -112,5 +122,12 @@ def score_ticker(
             "short_term_alpha": [component.as_dict() for component in short_components],
             "medium_term_alpha": [component.as_dict() for component in medium_components],
             "long_term_compounder": [component.as_dict() for component in long_components],
+        },
+        data_quality={
+            "live_price_data_available": live_price_data_available,
+            "fundamental_data_available": feature_set.fundamental_data_available,
+            "fallback_data_used": fallback_data_used,
+            "sample_fundamentals_used": feature_set.sample_fundamentals_used,
+            "missing_metrics": missing,
         },
     )

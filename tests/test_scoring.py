@@ -1,5 +1,7 @@
 import pandas as pd
+import pytest
 
+from tae.connectors.fallback import sample_price_history
 from tae.scoring.engine import score_ticker
 from tae.scoring.models import MODEL_A_WEIGHTS, MODEL_B_WEIGHTS, MODEL_C_WEIGHTS
 
@@ -14,7 +16,8 @@ def test_score_ticker_handles_missing_data():
     score = score_ticker("ABC", pd.DataFrame())
     assert score.ticker == "ABC"
     assert 0 <= score.overall_score <= 100
-    assert score.recommendation in {"Buy", "Watch", "Avoid"}
+    assert score.recommendation in {"Strong Buy", "Buy", "Watchlist", "Avoid"}
+    assert score.data_quality["fundamental_data_available"] is False
 
 
 def test_score_ticker_uses_price_momentum():
@@ -29,3 +32,20 @@ def test_score_ticker_uses_price_momentum():
     assert score.short_score > 0
     assert score.medium_score > 0
 
+
+@pytest.mark.parametrize("ticker", ["AAPL", "MSFT", "NVDA", "AMZN", "PLTR"])
+def test_known_research_tickers_use_sample_fundamentals(ticker):
+    prices = sample_price_history(periods=260)
+    score = score_ticker(
+        ticker,
+        prices,
+        live_price_data_available=False,
+        fallback_data_used=True,
+    )
+
+    assert score.short_score > 20
+    assert score.medium_score > 20
+    assert score.long_score > 20
+    assert score.overall_score > 20
+    assert score.data_quality["sample_fundamentals_used"] is True
+    assert score.data_quality["fundamental_data_available"] is True
