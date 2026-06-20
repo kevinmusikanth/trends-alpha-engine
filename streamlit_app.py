@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+from dataclasses import asdict
+
+import pandas as pd
+import streamlit as st
+
+from tae.backtesting.engine import banded_forward_returns, forward_returns
+from tae.connectors.yahoo import YahooFinanceConnector
+from tae.scoring.engine import score_ticker
+from tae.universe import get_universe
+
+st.set_page_config(page_title="Trends Alpha Engine", layout="wide")
+
+st.title("Trends Alpha Engine")
+st.caption("Research, scoring, ranking, screening, and backtesting only. Not financial advice.")
+
+connector = YahooFinanceConnector()
+
+tab_screener, tab_backtest, tab_watchlist, tab_portfolio = st.tabs(
+    ["Screener", "Backtesting", "Watchlist", "Portfolio Testing"]
+)
+
+with tab_screener:
+    ticker = st.text_input("Ticker", value="AAPL").upper().strip()
+    if st.button("Score ticker", type="primary"):
+        prices = connector.fetch_price_history(ticker, period="1y")
+        score = score_ticker(ticker, prices)
+        cols = st.columns(6)
+        cols[0].metric("Short-Term", score.short_score)
+        cols[1].metric("Medium-Term", score.medium_score)
+        cols[2].metric("Long-Term", score.long_score)
+        cols[3].metric("Overall", score.overall_score)
+        cols[4].metric("Risk", score.risk_score)
+        cols[5].metric("Label", score.recommendation)
+
+        st.subheader("Component Scores")
+        for model_name, components in score.components.items():
+            st.write(model_name.replace("_", " ").title())
+            st.dataframe(pd.DataFrame(components), use_container_width=True)
+
+with tab_backtest:
+    bt_ticker = st.text_input("Backtest ticker", value="MSFT").upper().strip()
+    start = st.text_input("Start date", value="2021-01-01")
+    end = st.text_input("End date", value="2024-12-31")
+    horizon = st.selectbox(
+        "Forward return horizon",
+        ["1w", "2w", "1m", "2m", "4m", "6m", "12m"],
+        index=2,
+    )
+    if st.button("Run backtest"):
+        prices = connector.fetch_price_history(bt_ticker, start=start, end=end)
+        returns = forward_returns(prices)
+        returns["score"] = 50.0
+        st.dataframe(banded_forward_returns(returns, horizon=horizon), use_container_width=True)
+        st.line_chart(returns.set_index("date")["close"])
+
+with tab_watchlist:
+    st.info(
+        "Version 1 includes watchlist data structures and score-change labels. "
+        "Database-backed watchlists are the next implementation step."
+    )
+
+with tab_portfolio:
+    universe_name = st.selectbox("Universe", ["sp500", "nasdaq100", "russell2000"])
+    n = st.selectbox("Portfolio size", [10, 25, 50])
+    st.write("Sample universe tickers:", ", ".join(get_universe(universe_name)))
+    st.info(f"Top {n} hypothetical portfolio testing is scaffolded in `tae.portfolio`.")

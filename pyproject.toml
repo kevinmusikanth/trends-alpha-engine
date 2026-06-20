@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trends-alpha-engine"
+version = "0.1.0"
+description = "Local-first stock scoring, ranking, screening, and backtesting research platform."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "backtesting>=0.3.3",
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "psycopg2-binary>=2.9",
+  "pydantic>=2.6",
+  "python-dotenv>=1.0",
+  "requests>=2.31",
+  "sqlalchemy>=2.0",
+  "streamlit>=1.32",
+  "yfinance>=0.2.36"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.3"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
