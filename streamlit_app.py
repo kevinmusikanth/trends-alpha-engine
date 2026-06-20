@@ -21,6 +21,12 @@ from tae.forecasting.alpha_validation import (
 )
 from tae.forecasting.backtest import prediction_test_frame, prediction_test_summary
 from tae.forecasting.engine import build_forecast_report
+from tae.forecasting.empirical import (
+    current_bucket_return_distribution,
+    empirical_fallback_message,
+    empirical_score_bucket_forecast,
+    score_bucket_comparison,
+)
 from tae.forecasting.outcomes import investment_outcome_projection, outcome_growth_paths
 from tae.forecasting.point_in_time import (
     forecast_calibration as pit_forecast_calibration,
@@ -258,6 +264,90 @@ def load_price_histories_for_tickers(
     return price_history_by_ticker, fallback_flags
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def empirical_validation_records(
+    tickers: tuple[str, ...],
+    start_date: str,
+    price_start: str,
+    step_days: int,
+) -> pd.DataFrame:
+    price_history_by_ticker = {}
+    fallback_flags = {}
+    for ticker in tickers:
+        prices, is_fallback = safe_price_history(ticker, start=price_start)
+        price_history_by_ticker[ticker] = prices
+        fallback_flags[ticker] = is_fallback
+    return point_in_time_prediction_frame(
+        price_history_by_ticker,
+        start_date=start_date,
+        fallback_data_used_by_ticker=fallback_flags,
+        step_days=step_days,
+    )
+
+
+def display_empirical_forecast_section(
+    score,
+    report,
+    validation_records: pd.DataFrame,
+    investment_amount: float,
+    currency: str,
+    min_observations: int,
+) -> None:
+    empirical = empirical_score_bucket_forecast(
+        score.overall_score,
+        validation_records,
+        investment_amount=investment_amount,
+        min_observations=min_observations,
+    )
+    theoretical = pd.DataFrame([line.__dict__ for line in report.forecasts])
+    theoretical = theoretical[["horizon", "base_case_pct", "confidence_pct"]].copy()
+    theoretical["horizon"] = theoretical["horizon"].replace(
+        {"3 year CAGR": "3 years", "5 year CAGR": "5 years"}
+    )
+
+    st.subheader("Historical Outcome Forecast")
+    st.info(
+        "This forecast is based on historical point-in-time outcomes of stocks "
+        "that scored in the same range, not on today's data alone."
+    )
+    st.write(empirical_fallback_message(empirical))
+    compare_cols = st.columns(2)
+    compare_cols[0].write("Theoretical Forecast")
+    compare_cols[0].dataframe(theoretical, use_container_width=True)
+    compare_cols[1].write("Empirical Score-Bucket Forecast")
+    empirical_display = empirical.copy()
+    empirical_display["expected_value"] = empirical_display["expected_value"].map(
+        lambda value: format_money(value, currency)
+    )
+    compare_cols[1].dataframe(empirical_display, use_container_width=True)
+
+    chart_cols = st.columns(3)
+    chart_cols[0].write("Win Rate by Horizon")
+    chart_cols[0].bar_chart(empirical.set_index("horizon")["win_rate_pct"])
+    chart_cols[1].write(f"{format_money(investment_amount, currency)} Outcome")
+    chart_cols[1].bar_chart(empirical.set_index("horizon")["expected_value"])
+    distribution = current_bucket_return_distribution(
+        score.overall_score,
+        validation_records,
+        horizon="12 months",
+    )
+    chart_cols[2].write("12M Return Distribution")
+    if distribution.empty:
+        chart_cols[2].warning("No 12-month observations for this bucket.")
+    else:
+        chart_cols[2].bar_chart(distribution.reset_index(drop=True))
+
+    comparison = score_bucket_comparison(validation_records)
+    if not comparison.empty:
+        st.subheader("Score Bucket Comparison")
+        comparison_horizon = st.selectbox(
+            "Empirical comparison horizon",
+            ["1 week", "1 month", "3 months", "6 months", "12 months", "3 years", "5 years"],
+        )
+        comparison_chart = comparison[comparison["horizon"] == comparison_horizon]
+        st.bar_chart(comparison_chart.set_index("score_bucket")["average_return_pct"])
+
+
 (
     tab_screener,
     tab_forecast,
@@ -336,6 +426,37 @@ with tab_screener:
 
 with tab_forecast:
     forecast_ticker = st.text_input("Forecast ticker", value="MSFT").upper().strip()
+    empirical_controls = st.expander("Empirical forecast settings")
+    with empirical_controls:
+        empirical_universe_text = st.text_area(
+            "Empirical validation tickers",
+            value="AAPL, MSFT, NVDA, AMZN, META, GOOGL, JPM, COST, TSLA, PLTR",
+        )
+        empirical_start = st.text_input("Empirical validation start date", value="2016-01-01")
+        empirical_step = st.number_input(
+            "Empirical historical date step",
+            min_value=21,
+            max_value=252,
+            value=63,
+            step=21,
+        )
+        empirical_min_observations = st.number_input(
+            "Minimum empirical observations",
+            min_value=1,
+            max_value=500,
+            value=10,
+            step=1,
+        )
+        empirical_investment = st.number_input(
+            "Empirical investment amount",
+            min_value=0.0,
+            value=10.0,
+            step=10.0,
+        )
+        empirical_currency = st.selectbox(
+            "Empirical currency",
+            ["$", "£", "€", "R"],
+        )
     if st.button("Generate forecast"):
         prices, is_fallback = safe_price_history(forecast_ticker, period="5y")
         if is_fallback:
@@ -351,7 +472,28 @@ with tab_forecast:
         score_cols[2].metric("Long-term compounder score", score.long_score)
         score_cols[3].metric("Risk score", score.risk_score)
         score_cols[4].metric("Overall score", score.overall_score)
+        report, forecast_frame, valuation_frame, positive_frame, negative_frame, exposure_frame = (
+            forecast_frames(score, prices)
+        )
         display_forecast_report(score, prices)
+        empirical_tickers = tuple(custom_tickers_from_text(empirical_universe_text))
+        if empirical_tickers:
+            validation_records = empirical_validation_records(
+                empirical_tickers,
+                start_date=empirical_start,
+                price_start="2013-01-01",
+                step_days=int(empirical_step),
+            )
+            display_empirical_forecast_section(
+                score,
+                report,
+                validation_records,
+                investment_amount=empirical_investment,
+                currency=empirical_currency,
+                min_observations=int(empirical_min_observations),
+            )
+        else:
+            st.warning("Add empirical validation tickers to build a historical outcome forecast.")
         st.caption(ADVICE_WARNING)
 
 

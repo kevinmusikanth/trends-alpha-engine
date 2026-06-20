@@ -94,3 +94,35 @@ def test_prediction_accuracy_dashboard_core_path_runs_with_fallback_data():
     assert not threshold.empty
     assert not calibration.empty
     assert frame["sample_fundamentals_used"].eq(False).all()
+
+
+def test_streamlit_forecast_tab_empirical_core_path_runs_with_fallback_data():
+    streamlit_app = load_streamlit_app()
+
+    prices = streamlit_app.sample_price_history(periods=300)
+    score, quality = streamlit_app.score_for_app("META", prices, True)
+    report, *_ = streamlit_app.forecast_frames(score, prices)
+    validation_records = streamlit_app.point_in_time_prediction_frame(
+        {
+            ticker: streamlit_app.sample_price_history(
+                start="2013-01-01",
+                end="2026-01-01",
+            )
+            for ticker in ["AAPL", "MSFT", "META"]
+        },
+        start_date="2016-01-01",
+        fallback_data_used_by_ticker={"AAPL": True, "MSFT": True, "META": True},
+        step_days=252,
+    )
+    empirical = streamlit_app.empirical_score_bucket_forecast(
+        score.overall_score,
+        validation_records,
+        investment_amount=10,
+        min_observations=1,
+    )
+
+    assert quality["fallback_data_used"] is True
+    assert report.ticker == "META"
+    assert not validation_records.empty
+    assert not empirical.empty
+    assert "expected_value" in empirical.columns

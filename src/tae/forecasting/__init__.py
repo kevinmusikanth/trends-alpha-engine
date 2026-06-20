@@ -15,6 +15,12 @@ from tae.forecasting.backtest import (
     prediction_test_summary,
 )
 from tae.forecasting.engine import build_forecast_report
+from tae.forecasting.empirical import (
+    current_bucket_return_distribution,
+    empirical_fallback_message,
+    empirical_score_bucket_forecast,
+    score_bucket_comparison,
+)
 from tae.forecasting.models import ForecastReport
 from tae.forecasting.outcomes import (
     investment_outcome_projection,
@@ -49,6 +55,9 @@ __all__ = [
     "benchmark_return_frame",
     "build_forecast_report",
     "confidence_framework",
+    "current_bucket_return_distribution",
+    "empirical_fallback_message",
+    "empirical_score_bucket_forecast",
     "final_investment_outcome_card",
     "investment_outcome_projection",
     "investment_outcome_by_bucket",
@@ -68,6 +77,7 @@ __all__ = [
     "forecast_calibration",
     "model_quality_metrics",
     "score_bucket_analysis",
+    "score_bucket_comparison",
     "universe_bucket_summary",
     "universe_calibration_curve",
     "universe_prediction_frame",
