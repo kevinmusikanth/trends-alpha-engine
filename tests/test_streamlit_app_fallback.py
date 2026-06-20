@@ -30,12 +30,21 @@ def test_streamlit_scoring_path_returns_quality_metadata():
 
     prices = streamlit_app.sample_price_history(periods=260)
     score, quality = streamlit_app.score_for_app("AAPL", prices, True)
+    report, forecast_frame, valuation_frame, positive_frame, negative_frame, exposure_frame = (
+        streamlit_app.forecast_frames(score, prices)
+    )
 
     assert score.ticker == "AAPL"
     assert score.long_score > 0
     assert "fallback_data_used" in quality
     assert "sample_fundamentals_used" in quality
     assert "missing_metrics" in quality
+    assert not forecast_frame.empty
+    assert not valuation_frame.empty
+    assert not positive_frame.empty
+    assert not negative_frame.empty
+    assert not exposure_frame.empty
+    assert report.valuation.current_price > 0
 
 
 def test_streamlit_scoring_path_handles_older_score_signature(monkeypatch):

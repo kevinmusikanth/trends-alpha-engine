@@ -8,6 +8,8 @@ import streamlit as st
 from tae.backtesting.engine import banded_forward_returns, forward_returns
 from tae.connectors.fallback import sample_price_history
 from tae.connectors.yahoo import YahooFinanceConnector
+from tae.forecasting.backtest import prediction_test_frame, prediction_test_summary
+from tae.forecasting.engine import build_forecast_report
 from tae.scoring.engine import score_ticker
 from tae.universe import get_universe
 
@@ -82,8 +84,70 @@ def score_for_app(ticker: str, prices: pd.DataFrame, is_fallback: bool):
     score = score_ticker(ticker, prices, **kwargs)
     return score, quality_for_display(score, prices, is_fallback)
 
-tab_screener, tab_backtest, tab_watchlist, tab_portfolio = st.tabs(
-    ["Screener", "Backtesting", "Watchlist", "Portfolio Testing"]
+
+def forecast_frames(score, prices: pd.DataFrame):
+    report = build_forecast_report(score, prices)
+    forecast_frame = pd.DataFrame([line.__dict__ for line in report.forecasts])
+    valuation_frame = pd.DataFrame([report.valuation.__dict__])
+    positive_frame = pd.DataFrame([driver.__dict__ for driver in report.top_positive_drivers])
+    negative_frame = pd.DataFrame([driver.__dict__ for driver in report.top_negative_drivers])
+    exposure_frame = pd.DataFrame(
+        {
+            "factor": list(report.factor_exposures.keys()),
+            "exposure_pct": list(report.factor_exposures.values()),
+        }
+    )
+    return report, forecast_frame, valuation_frame, positive_frame, negative_frame, exposure_frame
+
+
+def display_forecast_report(score, prices: pd.DataFrame) -> None:
+    report, forecast_frame, valuation_frame, positive_frame, negative_frame, exposure_frame = (
+        forecast_frames(score, prices)
+    )
+    st.subheader("Forecast")
+    grouped = forecast_frame.groupby("group", sort=False)
+    for group, frame in grouped:
+        st.write(group)
+        st.dataframe(
+            frame[
+                [
+                    "horizon",
+                    "expected_return_pct",
+                    "bear_case_pct",
+                    "base_case_pct",
+                    "bull_case_pct",
+                    "confidence_pct",
+                ]
+            ],
+            use_container_width=True,
+        )
+
+    st.subheader("Valuation")
+    st.dataframe(valuation_frame, use_container_width=True)
+
+    st.subheader("Model Explanation")
+    driver_cols = st.columns(2)
+    driver_cols[0].write("Top positive drivers")
+    driver_cols[0].dataframe(positive_frame, use_container_width=True)
+    driver_cols[1].write("Top negative drivers")
+    driver_cols[1].dataframe(negative_frame, use_container_width=True)
+    st.write("Factor exposures")
+    st.dataframe(exposure_frame, use_container_width=True)
+    st.caption(
+        "Forecasts are factor-based research estimates from momentum, valuation, "
+        "growth, quality, institutional, and risk factors."
+    )
+
+
+tab_screener, tab_forecast, tab_prediction, tab_backtest, tab_watchlist, tab_portfolio = st.tabs(
+    [
+        "Screener",
+        "Forecast",
+        "Prediction Testing",
+        "Backtesting",
+        "Watchlist",
+        "Portfolio Testing",
+    ]
 )
 
 with tab_screener:
@@ -102,6 +166,8 @@ with tab_screener:
         cols[3].metric("Risk score", score.risk_score)
         cols[4].metric("Overall score", score.overall_score)
         cols[5].metric("Label", score.recommendation)
+
+        display_forecast_report(score, prices)
 
         st.subheader("Data Quality")
         quality_cols = st.columns(4)
@@ -130,6 +196,86 @@ with tab_screener:
         for model_name, components in score.components.items():
             st.write(model_name.replace("_", " ").title())
             st.dataframe(pd.DataFrame(components), use_container_width=True)
+
+
+with tab_forecast:
+    forecast_ticker = st.text_input("Forecast ticker", value="MSFT").upper().strip()
+    if st.button("Generate forecast"):
+        prices, is_fallback = safe_price_history(forecast_ticker, period="5y")
+        if is_fallback:
+            st.warning(YAHOO_WARNING)
+        score, quality = score_for_app(forecast_ticker, prices, is_fallback)
+        if quality["sample_fundamentals_used"]:
+            st.warning("Sample fundamentals used")
+        score_cols = st.columns(5)
+        score_cols[0].metric("Short-term trading score", score.short_score)
+        score_cols[1].metric("Medium-term alpha score", score.medium_score)
+        score_cols[2].metric("Long-term compounder score", score.long_score)
+        score_cols[3].metric("Risk score", score.risk_score)
+        score_cols[4].metric("Overall score", score.overall_score)
+        display_forecast_report(score, prices)
+        st.caption(ADVICE_WARNING)
+
+
+with tab_prediction:
+    test_ticker = st.text_input("Prediction test ticker", value="AAPL").upper().strip()
+    test_start = st.text_input("Prediction test start date", value="2022-01-01")
+    test_horizon = st.selectbox(
+        "Prediction horizon",
+        ["1 week", "1 month", "3 months", "6 months", "12 months"],
+        index=1,
+    )
+    if st.button("Run prediction test"):
+        prices, is_fallback = safe_price_history(test_ticker, start="2018-01-01")
+        if is_fallback:
+            st.warning(YAHOO_WARNING)
+        frame = prediction_test_frame(
+            test_ticker,
+            prices,
+            start_date=test_start,
+            horizon=test_horizon,
+            fallback_data_used=is_fallback,
+        )
+        summary = prediction_test_summary(frame)
+        metric_cols = st.columns(5)
+        metric_cols[0].metric("Hit rate", f"{summary['hit_rate'] * 100:.1f}%")
+        metric_cols[1].metric("Average error", f"{summary['average_error']:.1f}%")
+        metric_cols[2].metric("Sharpe ratio", f"{summary['sharpe_ratio']:.2f}")
+        metric_cols[3].metric("CAGR", f"{summary['cagr'] * 100:.1f}%")
+        metric_cols[4].metric(
+            "Maximum drawdown",
+            f"{summary['maximum_drawdown'] * 100:.1f}%",
+        )
+
+        if frame.empty:
+            st.warning("Not enough future price history to test this horizon.")
+        else:
+            chart_frame = frame.set_index("date")[["predicted_return", "actual_return"]] * 100
+            st.subheader("Predicted vs Actual Returns")
+            st.line_chart(chart_frame)
+
+            accuracy = frame[["date", "hit"]].copy()
+            accuracy["rolling_accuracy"] = accuracy["hit"].rolling(6).mean() * 100
+            st.subheader("Rolling Accuracy")
+            st.line_chart(accuracy.set_index("date")["rolling_accuracy"])
+
+            distribution = (
+                frame.groupby("score_bucket")["actual_return"]
+                .mean()
+                .mul(100)
+                .reset_index(name="average_actual_return_pct")
+            )
+            st.subheader("Return Distribution by Score Bucket")
+            st.bar_chart(distribution.set_index("score_bucket"))
+
+            calibration = frame[["confidence_bucket", "hit"]].copy()
+            calibration = calibration.groupby("confidence_bucket")["hit"].mean().mul(100)
+            st.subheader("Confidence Calibration")
+            st.bar_chart(calibration)
+
+            st.dataframe(frame, use_container_width=True)
+        st.caption(ADVICE_WARNING)
+
 
 with tab_backtest:
     bt_ticker = st.text_input("Backtest ticker", value="MSFT").upper().strip()
