@@ -11,8 +11,10 @@ def sample_price_history(
     periods: int = 260,
 ) -> pd.DataFrame:
     """Create deterministic fallback OHLCV data when live data is unavailable."""
-    if start and end:
-        dates = pd.date_range(start=start, end=end, freq="B")
+    if start:
+        dates = pd.date_range(start=start, end=end or pd.Timestamp.today().normalize(), freq="B")
+    elif end:
+        dates = pd.date_range(end=end, periods=periods, freq="B")
     else:
         dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=periods, freq="B")
 
@@ -36,4 +38,3 @@ def sample_price_history(
             }
         )
     return pd.DataFrame(rows)
-

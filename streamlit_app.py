@@ -8,6 +8,17 @@ import streamlit as st
 from tae.backtesting.engine import banded_forward_returns, forward_returns
 from tae.connectors.fallback import sample_price_history
 from tae.connectors.yahoo import YahooFinanceConnector
+from tae.forecasting.alpha_validation import (
+    alpha_validation_frame,
+    benchmark_comparison,
+    benchmark_return_frame,
+    confidence_framework,
+    final_investment_outcome_card,
+    investment_outcome_by_bucket,
+    predictor_validation_metrics,
+    score_bucket_performance,
+    threshold_analysis,
+)
 from tae.forecasting.backtest import prediction_test_frame, prediction_test_summary
 from tae.forecasting.engine import build_forecast_report
 from tae.forecasting.outcomes import investment_outcome_projection, outcome_growth_paths
@@ -225,11 +236,27 @@ def custom_tickers_from_text(raw_tickers: str) -> list[str]:
     return tickers
 
 
+def load_price_histories_for_tickers(
+    tickers: list[str],
+    start: str,
+) -> tuple[dict[str, pd.DataFrame], dict[str, bool]]:
+    price_history_by_ticker = {}
+    fallback_flags = {}
+    progress = st.progress(0)
+    for index, ticker in enumerate(tickers, start=1):
+        prices, is_fallback = safe_price_history(ticker, start=start)
+        price_history_by_ticker[ticker] = prices
+        fallback_flags[ticker] = is_fallback
+        progress.progress(index / len(tickers))
+    return price_history_by_ticker, fallback_flags
+
+
 (
     tab_screener,
     tab_forecast,
     tab_prediction,
     tab_validation,
+    tab_alpha_validation,
     tab_universe,
     tab_backtest,
     tab_watchlist,
@@ -240,6 +267,7 @@ def custom_tickers_from_text(raw_tickers: str) -> list[str]:
         "Forecast",
         "Prediction Testing",
         "Validation Dashboard",
+        "ALPHA VALIDATION",
         "Universe Backtest",
         "Backtesting",
         "Watchlist",
@@ -256,6 +284,8 @@ with tab_screener:
         score, quality = score_for_app(ticker, prices, is_fallback)
         if quality["sample_fundamentals_used"]:
             st.warning("Sample fundamentals used")
+        if not quality["fundamental_data_available"]:
+            st.warning("Fundamental data missing — score incomplete")
         cols = st.columns(6)
         cols[0].metric("Short-term trading score", score.short_score)
         cols[1].metric("Medium-term alpha score", score.medium_score)
@@ -304,6 +334,8 @@ with tab_forecast:
         score, quality = score_for_app(forecast_ticker, prices, is_fallback)
         if quality["sample_fundamentals_used"]:
             st.warning("Sample fundamentals used")
+        if not quality["fundamental_data_available"]:
+            st.warning("Fundamental data missing — score incomplete")
         score_cols = st.columns(5)
         score_cols[0].metric("Short-term trading score", score.short_score)
         score_cols[1].metric("Medium-term alpha score", score.medium_score)
@@ -470,6 +502,232 @@ with tab_validation:
             st.dataframe(importance_frame, use_container_width=True)
             if not importance_frame.empty:
                 st.bar_chart(importance_frame.set_index("factor")["importance"])
+        st.caption(ADVICE_WARNING)
+
+
+with tab_alpha_validation:
+    alpha_universe_choice = st.selectbox(
+        "Alpha validation universe",
+        ["S&P 500", "Nasdaq 100", "Custom tickers"],
+    )
+    alpha_custom_universe = ""
+    if alpha_universe_choice == "Custom tickers":
+        alpha_custom_universe = st.text_area(
+            "Alpha custom ticker universe",
+            value="AAPL, MSFT, NVDA, AMZN, META, GOOGL, JPM, COST, TSLA, PLTR",
+        )
+    alpha_start = st.text_input("Alpha validation start date", value="2018-01-01")
+    alpha_max_tickers = st.number_input(
+        "Alpha maximum tickers",
+        min_value=1,
+        max_value=100,
+        value=10,
+        step=1,
+    )
+    alpha_step_days = st.number_input(
+        "Historical date step",
+        min_value=1,
+        max_value=252,
+        value=21,
+        step=1,
+    )
+    alpha_amount_cols = st.columns([2, 1])
+    alpha_investment_amount = alpha_amount_cols[0].number_input(
+        "Alpha investment amount",
+        min_value=0.0,
+        value=10.0,
+        step=10.0,
+    )
+    alpha_currency = alpha_amount_cols[1].selectbox(
+        "Alpha currency",
+        ["$", "£", "€", "R"],
+    )
+    today_ticker = st.text_input("Today outcome ticker", value="META").upper().strip()
+
+    if st.button("Run alpha validation"):
+        if alpha_universe_choice == "S&P 500":
+            alpha_tickers = get_universe("sp500")
+        elif alpha_universe_choice == "Nasdaq 100":
+            alpha_tickers = get_universe("nasdaq100")
+        else:
+            alpha_tickers = custom_tickers_from_text(alpha_custom_universe)
+
+        alpha_tickers = alpha_tickers[: int(alpha_max_tickers)]
+        if not alpha_tickers:
+            st.warning("Add at least one ticker to run alpha validation.")
+        else:
+            price_history_by_ticker, fallback_flags = load_price_histories_for_tickers(
+                alpha_tickers,
+                start="2015-01-01",
+            )
+            if any(fallback_flags.values()):
+                st.warning(YAHOO_WARNING)
+
+            frame = alpha_validation_frame(
+                price_history_by_ticker,
+                start_date=alpha_start,
+                fallback_data_used_by_ticker=fallback_flags,
+                step_days=int(alpha_step_days),
+            )
+            bucket_frame = score_bucket_performance(frame)
+            predictor_metrics = predictor_validation_metrics(frame)
+            investment_frame = investment_outcome_by_bucket(
+                bucket_frame,
+                alpha_investment_amount,
+            )
+            threshold_frame = threshold_analysis(frame)
+
+            spy_prices, _ = safe_price_history("SPY", start="2015-01-01")
+            qqq_prices, _ = safe_price_history("QQQ", start="2015-01-01")
+            benchmarks = {
+                "S&P 500": benchmark_return_frame(
+                    "S&P 500",
+                    spy_prices,
+                    start_date=alpha_start,
+                    step_days=int(alpha_step_days),
+                ),
+                "Nasdaq 100": benchmark_return_frame(
+                    "Nasdaq 100",
+                    qqq_prices,
+                    start_date=alpha_start,
+                    step_days=int(alpha_step_days),
+                ),
+            }
+            benchmark_frame = benchmark_comparison(frame, benchmarks)
+
+            st.subheader("Validation Coverage")
+            coverage_cols = st.columns(4)
+            coverage_cols[0].metric("Tickers", len(alpha_tickers))
+            coverage_cols[1].metric("Observations", len(frame))
+            coverage_cols[2].metric(
+                "Fallback tickers",
+                sum(1 for value in fallback_flags.values() if value),
+            )
+            coverage_cols[3].metric(
+                "Live tickers",
+                sum(1 for value in fallback_flags.values() if not value),
+            )
+
+            if frame.empty:
+                st.warning("Not enough history to build alpha validation.")
+            else:
+                st.subheader("Score Bucket Performance")
+                st.dataframe(bucket_frame, use_container_width=True)
+
+                st.subheader("Score Bucket vs Average Return")
+                st.bar_chart(
+                    bucket_frame.pivot(
+                        index="score_bucket",
+                        columns="horizon",
+                        values="average_return_pct",
+                    )
+                )
+                chart_cols = st.columns(3)
+                chart_cols[0].write("Score Bucket vs Win Rate")
+                chart_cols[0].bar_chart(
+                    bucket_frame.pivot(
+                        index="score_bucket",
+                        columns="horizon",
+                        values="win_rate_pct",
+                    )
+                )
+                chart_cols[1].write("Score Bucket vs Sharpe")
+                chart_cols[1].bar_chart(
+                    bucket_frame.pivot(
+                        index="score_bucket",
+                        columns="horizon",
+                        values="sharpe_ratio",
+                    )
+                )
+                chart_cols[2].write("Score Bucket vs Drawdown")
+                chart_cols[2].bar_chart(
+                    bucket_frame.pivot(
+                        index="score_bucket",
+                        columns="horizon",
+                        values="maximum_drawdown_pct",
+                    )
+                )
+
+                st.subheader("Predictor Validation")
+                metric_cols = st.columns(5)
+                metric_cols[0].metric(
+                    "Score/return correlation",
+                    f"{predictor_metrics['correlation']:.3f}",
+                )
+                metric_cols[1].metric("R squared", f"{predictor_metrics['r_squared']:.3f}")
+                metric_cols[2].metric(
+                    "Information coefficient",
+                    f"{predictor_metrics['information_coefficient']:.3f}",
+                )
+                metric_cols[3].metric(
+                    "Hit rate",
+                    f"{predictor_metrics['hit_rate_pct']:.1f}%",
+                )
+                metric_cols[4].metric(
+                    "Calibration accuracy",
+                    f"{predictor_metrics['calibration_accuracy_pct']:.1f}%",
+                )
+                st.metric("Predictive power", predictor_metrics["predictive_power"])
+
+                st.subheader("Investment Simulation")
+                simulation = investment_frame.copy()
+                simulation["expected_value"] = simulation["expected_value"].map(
+                    lambda value: format_money(value, alpha_currency)
+                )
+                simulation["profit_loss"] = simulation["profit_loss"].map(
+                    lambda value: format_money(value, alpha_currency)
+                )
+                st.dataframe(simulation, use_container_width=True)
+
+                st.subheader("Score Threshold Analysis")
+                st.dataframe(threshold_frame, use_container_width=True)
+
+                st.subheader("Benchmark Comparison")
+                st.dataframe(benchmark_frame, use_container_width=True)
+
+                today_prices, today_fallback = safe_price_history(today_ticker, period="5y")
+                today_score, _ = score_for_app(today_ticker, today_prices, today_fallback)
+                confidence = confidence_framework(
+                    bucket_frame,
+                    today_score.overall_score,
+                    horizon="12 months",
+                )
+                st.subheader("Confidence Framework")
+                confidence_cols = st.columns(5)
+                confidence_cols[0].metric("Score", f"{today_score.overall_score:.2f}")
+                confidence_cols[1].metric("Bucket", confidence["score_bucket"])
+                confidence_cols[2].metric(
+                    "12M positive probability",
+                    f"{confidence['probability_positive_pct']:.1f}%",
+                )
+                confidence_cols[3].metric(
+                    "12M probability of loss",
+                    f"{confidence['probability_loss_pct']:.1f}%",
+                )
+                confidence_cols[4].metric("Confidence", confidence["confidence"])
+
+                st.subheader("Final Investment Outcome Card")
+                card_frame = final_investment_outcome_card(
+                    bucket_frame,
+                    today_score.overall_score,
+                    alpha_investment_amount,
+                )
+                if card_frame.empty:
+                    st.warning("No historical bucket observations for this score.")
+                else:
+                    card_display = card_frame.copy()
+                    card_display["expected_value"] = card_display["expected_value"].map(
+                        lambda value: format_money(value, alpha_currency)
+                    )
+                    st.write(
+                        "If historical relationships continue, "
+                        f"{format_money(alpha_investment_amount, alpha_currency)} "
+                        "invested today is expected to become:"
+                    )
+                    st.dataframe(card_display, use_container_width=True)
+
+                st.subheader("Stored Validation Records")
+                st.dataframe(frame, use_container_width=True)
         st.caption(ADVICE_WARNING)
 
 

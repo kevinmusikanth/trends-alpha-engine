@@ -3,6 +3,7 @@ import pytest
 
 from tae.connectors.fallback import sample_price_history
 from tae.scoring.engine import score_ticker
+from tae.scoring.fundamentals import FUNDAMENTAL_FEATURE_KEYS, SAMPLE_FUNDAMENTALS
 from tae.scoring.models import MODEL_A_WEIGHTS, MODEL_B_WEIGHTS, MODEL_C_WEIGHTS
 
 
@@ -33,7 +34,22 @@ def test_score_ticker_uses_price_momentum():
     assert score.medium_score > 0
 
 
-@pytest.mark.parametrize("ticker", ["AAPL", "MSFT", "NVDA", "AMZN", "PLTR"])
+@pytest.mark.parametrize(
+    "ticker",
+    [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AMZN",
+        "META",
+        "GOOGL",
+        "BRK-B",
+        "JPM",
+        "COST",
+        "TSLA",
+        "PLTR",
+    ],
+)
 def test_known_research_tickers_use_sample_fundamentals(ticker):
     prices = sample_price_history(periods=260)
     score = score_ticker(
@@ -49,3 +65,44 @@ def test_known_research_tickers_use_sample_fundamentals(ticker):
     assert score.overall_score > 20
     assert score.data_quality["sample_fundamentals_used"] is True
     assert score.data_quality["fundamental_data_available"] is True
+
+
+def test_meta_uses_sample_fundamentals_and_scores_are_not_zero():
+    prices = sample_price_history(periods=260)
+    score = score_ticker(
+        "META",
+        prices,
+        live_price_data_available=False,
+        fallback_data_used=True,
+    )
+
+    assert score.medium_score > 20
+    assert score.long_score > 20
+    assert score.overall_score > 20
+    assert score.recommendation in {"Strong Buy", "Buy", "Watchlist", "Avoid"}
+    assert score.data_quality["sample_fundamentals_used"] is True
+    assert score.data_quality["fundamental_data_available"] is True
+    assert not any(
+        metric in score.data_quality["missing_metrics"]
+        for metric in FUNDAMENTAL_FEATURE_KEYS
+    )
+
+
+def test_requested_mega_cap_sample_fundamentals_are_complete():
+    tickers = [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AMZN",
+        "META",
+        "GOOGL",
+        "BRK-B",
+        "JPM",
+        "COST",
+        "TSLA",
+        "PLTR",
+    ]
+
+    for ticker in tickers:
+        assert ticker in SAMPLE_FUNDAMENTALS
+        assert FUNDAMENTAL_FEATURE_KEYS.issubset(SAMPLE_FUNDAMENTALS[ticker])
