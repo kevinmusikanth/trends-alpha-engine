@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from time import sleep
 
 import pandas as pd
 import yfinance as yf
@@ -16,8 +17,27 @@ class CompanyProfile:
     market_cap: float | None
 
 
+class YahooFinanceError(RuntimeError):
+    """Raised when Yahoo Finance data cannot be fetched after retries."""
+
+
 class YahooFinanceConnector:
     """Yahoo Finance connector for free price and company metadata."""
+
+    def __init__(self, max_retries: int = 3, backoff_seconds: float = 1.0) -> None:
+        self.max_retries = max_retries
+        self.backoff_seconds = backoff_seconds
+
+    def _retry(self, operation):
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                return operation()
+            except Exception as error:  # yfinance raises several transport-specific errors.
+                last_error = error
+                if attempt < self.max_retries - 1:
+                    sleep(self.backoff_seconds * (2**attempt))
+        raise YahooFinanceError(str(last_error)) from last_error
 
     def fetch_price_history(
         self,
@@ -26,11 +46,13 @@ class YahooFinanceConnector:
         end: str | date | None = None,
         period: str | None = None,
     ) -> pd.DataFrame:
-        history = yf.Ticker(ticker).history(
-            start=start,
-            end=end,
-            period=period,
-            auto_adjust=False,
+        history = self._retry(
+            lambda: yf.Ticker(ticker).history(
+                start=start,
+                end=end,
+                period=period,
+                auto_adjust=False,
+            )
         )
         if history.empty:
             return pd.DataFrame(
@@ -52,7 +74,7 @@ class YahooFinanceConnector:
         return history[available].copy()
 
     def fetch_profile(self, ticker: str) -> CompanyProfile:
-        info = yf.Ticker(ticker).get_info()
+        info = self._retry(lambda: yf.Ticker(ticker).get_info())
         return CompanyProfile(
             ticker=ticker.upper(),
             name=info.get("longName") or info.get("shortName"),
@@ -69,4 +91,3 @@ class YahooFinanceConnector:
             "balance_sheet": stock.balance_sheet,
             "cash_flow": stock.cashflow,
         }
-

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-
 import pandas as pd
 import streamlit as st
 
 from tae.backtesting.engine import banded_forward_returns, forward_returns
-from tae.connectors.yahoo import YahooFinanceConnector
+from tae.connectors.fallback import sample_price_history
+from tae.connectors.yahoo import YahooFinanceConnector, YahooFinanceError
 from tae.scoring.engine import score_ticker
 from tae.universe import get_universe
 
@@ -15,7 +14,36 @@ st.set_page_config(page_title="Trends Alpha Engine", layout="wide")
 st.title("Trends Alpha Engine")
 st.caption("Research, scoring, ranking, screening, and backtesting only. Not financial advice.")
 
-connector = YahooFinanceConnector()
+YAHOO_WARNING = "Live Yahoo data temporarily unavailable."
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_price_history(
+    ticker: str,
+    start: str | None = None,
+    end: str | None = None,
+    period: str | None = None,
+) -> pd.DataFrame:
+    connector = YahooFinanceConnector(max_retries=3, backoff_seconds=1.5)
+    return connector.fetch_price_history(ticker, start=start, end=end, period=period)
+
+
+def safe_price_history(
+    ticker: str,
+    start: str | None = None,
+    end: str | None = None,
+    period: str | None = None,
+) -> tuple[pd.DataFrame, bool]:
+    try:
+        prices = load_price_history(ticker, start=start, end=end, period=period)
+        if not prices.empty:
+            return prices, False
+    except YahooFinanceError:
+        pass
+    except Exception:
+        pass
+
+    return sample_price_history(start=start, end=end), True
 
 tab_screener, tab_backtest, tab_watchlist, tab_portfolio = st.tabs(
     ["Screener", "Backtesting", "Watchlist", "Portfolio Testing"]
@@ -24,7 +52,9 @@ tab_screener, tab_backtest, tab_watchlist, tab_portfolio = st.tabs(
 with tab_screener:
     ticker = st.text_input("Ticker", value="AAPL").upper().strip()
     if st.button("Score ticker", type="primary"):
-        prices = connector.fetch_price_history(ticker, period="1y")
+        prices, is_fallback = safe_price_history(ticker, period="1y")
+        if is_fallback:
+            st.warning(YAHOO_WARNING)
         score = score_ticker(ticker, prices)
         cols = st.columns(6)
         cols[0].metric("Short-Term", score.short_score)
@@ -49,7 +79,9 @@ with tab_backtest:
         index=2,
     )
     if st.button("Run backtest"):
-        prices = connector.fetch_price_history(bt_ticker, start=start, end=end)
+        prices, is_fallback = safe_price_history(bt_ticker, start=start, end=end)
+        if is_fallback:
+            st.warning(YAHOO_WARNING)
         returns = forward_returns(prices)
         returns["score"] = 50.0
         st.dataframe(banded_forward_returns(returns, horizon=horizon), use_container_width=True)
