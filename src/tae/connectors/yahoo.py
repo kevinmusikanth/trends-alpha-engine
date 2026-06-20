@@ -17,10 +17,6 @@ class CompanyProfile:
     market_cap: float | None
 
 
-class YahooFinanceError(RuntimeError):
-    """Raised when Yahoo Finance data cannot be fetched after retries."""
-
-
 class YahooFinanceConnector:
     """Yahoo Finance connector for free price and company metadata."""
 
@@ -37,7 +33,7 @@ class YahooFinanceConnector:
                 last_error = error
                 if attempt < self.max_retries - 1:
                     sleep(self.backoff_seconds * (2**attempt))
-        raise YahooFinanceError(str(last_error)) from last_error
+        raise RuntimeError(f"Yahoo Finance request failed: {last_error}") from last_error
 
     def fetch_price_history(
         self,
