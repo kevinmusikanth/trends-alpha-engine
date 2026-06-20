@@ -5,7 +5,7 @@ import streamlit as st
 
 from tae.backtesting.engine import banded_forward_returns, forward_returns
 from tae.connectors.fallback import sample_price_history
-from tae.connectors.yahoo import YahooFinanceConnector, YahooFinanceError
+from tae.connectors.yahoo import YahooFinanceConnector
 from tae.scoring.engine import score_ticker
 from tae.universe import get_universe
 
@@ -38,8 +38,6 @@ def safe_price_history(
         prices = load_price_history(ticker, start=start, end=end, period=period)
         if not prices.empty:
             return prices, False
-    except YahooFinanceError:
-        pass
     except Exception:
         pass
 
