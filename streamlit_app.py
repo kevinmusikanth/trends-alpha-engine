@@ -10,6 +10,12 @@ from tae.connectors.fallback import sample_price_history
 from tae.connectors.yahoo import YahooFinanceConnector
 from tae.forecasting.backtest import prediction_test_frame, prediction_test_summary
 from tae.forecasting.engine import build_forecast_report
+from tae.forecasting.outcomes import investment_outcome_projection, outcome_growth_paths
+from tae.forecasting.universe import (
+    universe_bucket_summary,
+    universe_calibration_curve,
+    universe_prediction_frame,
+)
 from tae.forecasting.validation import (
     confidence_calibration,
     feature_importance,
@@ -108,6 +114,67 @@ def forecast_frames(score, prices: pd.DataFrame):
     return report, forecast_frame, valuation_frame, positive_frame, negative_frame, exposure_frame
 
 
+def format_money(value: float, currency: str) -> str:
+    return f"{currency}{value:,.0f}"
+
+
+def display_investment_outcome(report) -> None:
+    st.subheader("Investment Outcome Projection")
+    controls = st.columns([2, 1])
+    investment_amount = controls[0].number_input(
+        "Investment amount",
+        min_value=0.0,
+        value=10000.0,
+        step=500.0,
+        key=f"investment_amount_{report.ticker}",
+    )
+    currency = controls[1].selectbox(
+        "Currency",
+        ["$", "£", "€", "R"],
+        key=f"investment_currency_{report.ticker}",
+    )
+
+    outcomes = investment_outcome_projection(report, investment_amount)
+    st.write(f"If you invest {format_money(investment_amount, currency)} today:")
+    for row in outcomes.to_dict("records"):
+        st.write(row["horizon"])
+        case_cols = st.columns(3)
+        case_cols[0].metric("Bear", format_money(row["bear_case_value"], currency))
+        case_cols[1].metric("Base", format_money(row["base_case_value"], currency))
+        case_cols[2].metric("Bull", format_money(row["bull_case_value"], currency))
+
+    display_frame = outcomes.copy()
+    for column in [
+        "bear_case_value",
+        "base_case_value",
+        "bull_case_value",
+        "expected_value",
+    ]:
+        display_frame[column] = display_frame[column].map(
+            lambda value: format_money(value, currency)
+        )
+    st.dataframe(
+        display_frame[
+            [
+                "horizon",
+                "bear_case_value",
+                "base_case_value",
+                "bull_case_value",
+                "expected_value",
+                "expected_cagr_pct",
+                "probability_positive_return_pct",
+                "probability_losing_money_pct",
+            ]
+        ],
+        use_container_width=True,
+    )
+
+    growth_paths = outcome_growth_paths(outcomes, investment_amount)
+    chart = growth_paths.set_index("horizon")[["Bear", "Base", "Bull"]]
+    st.subheader("Projected Growth Paths")
+    st.line_chart(chart)
+
+
 def display_forecast_report(score, prices: pd.DataFrame) -> None:
     report, forecast_frame, valuation_frame, positive_frame, negative_frame, exposure_frame = (
         forecast_frames(score, prices)
@@ -133,6 +200,8 @@ def display_forecast_report(score, prices: pd.DataFrame) -> None:
     st.subheader("Valuation")
     st.dataframe(valuation_frame, use_container_width=True)
 
+    display_investment_outcome(report)
+
     st.subheader("Model Explanation")
     driver_cols = st.columns(2)
     driver_cols[0].write("Top positive drivers")
@@ -147,11 +216,21 @@ def display_forecast_report(score, prices: pd.DataFrame) -> None:
     )
 
 
+def custom_tickers_from_text(raw_tickers: str) -> list[str]:
+    tickers = []
+    for value in raw_tickers.replace("\n", ",").split(","):
+        ticker = value.upper().strip()
+        if ticker and ticker not in tickers:
+            tickers.append(ticker)
+    return tickers
+
+
 (
     tab_screener,
     tab_forecast,
     tab_prediction,
     tab_validation,
+    tab_universe,
     tab_backtest,
     tab_watchlist,
     tab_portfolio,
@@ -161,6 +240,7 @@ def display_forecast_report(score, prices: pd.DataFrame) -> None:
         "Forecast",
         "Prediction Testing",
         "Validation Dashboard",
+        "Universe Backtest",
         "Backtesting",
         "Watchlist",
         "Portfolio Testing",
@@ -390,6 +470,122 @@ with tab_validation:
             st.dataframe(importance_frame, use_container_width=True)
             if not importance_frame.empty:
                 st.bar_chart(importance_frame.set_index("factor")["importance"])
+        st.caption(ADVICE_WARNING)
+
+
+with tab_universe:
+    universe_choice = st.selectbox(
+        "Universe",
+        ["S&P 500", "Nasdaq 100", "Custom tickers"],
+    )
+    custom_universe = ""
+    if universe_choice == "Custom tickers":
+        custom_universe = st.text_area(
+            "Custom ticker universe",
+            value="AAPL, MSFT, NVDA, AMZN, PLTR",
+        )
+    universe_start = st.text_input("Universe validation start date", value="2022-01-01")
+    max_tickers = st.number_input(
+        "Maximum tickers to test",
+        min_value=1,
+        max_value=100,
+        value=10,
+        step=1,
+    )
+
+    if st.button("Run universe backtest"):
+        if universe_choice == "S&P 500":
+            universe_tickers = get_universe("sp500")
+        elif universe_choice == "Nasdaq 100":
+            universe_tickers = get_universe("nasdaq100")
+        else:
+            universe_tickers = custom_tickers_from_text(custom_universe)
+
+        universe_tickers = universe_tickers[: int(max_tickers)]
+        if not universe_tickers:
+            st.warning("Add at least one ticker to run the universe backtest.")
+        else:
+            price_history_by_ticker = {}
+            fallback_flags = {}
+            progress = st.progress(0)
+            for index, ticker in enumerate(universe_tickers, start=1):
+                prices, is_fallback = safe_price_history(ticker, start="2018-01-01")
+                price_history_by_ticker[ticker] = prices
+                fallback_flags[ticker] = is_fallback
+                progress.progress(index / len(universe_tickers))
+
+            if any(fallback_flags.values()):
+                st.warning(YAHOO_WARNING)
+
+            frame = universe_prediction_frame(
+                price_history_by_ticker,
+                start_date=universe_start,
+                fallback_data_used_by_ticker=fallback_flags,
+            )
+            summary = universe_bucket_summary(frame)
+            calibration = universe_calibration_curve(frame)
+
+            st.subheader("Universe Coverage")
+            coverage_cols = st.columns(4)
+            coverage_cols[0].metric("Tickers tested", len(universe_tickers))
+            coverage_cols[1].metric("Observations", len(frame))
+            coverage_cols[2].metric(
+                "Fallback tickers",
+                sum(1 for value in fallback_flags.values() if value),
+            )
+            coverage_cols[3].metric(
+                "Live tickers",
+                sum(1 for value in fallback_flags.values() if not value),
+            )
+            st.write(", ".join(universe_tickers))
+
+            if frame.empty:
+                st.warning("Not enough future price history for this universe/date.")
+            else:
+                st.subheader("Score Bucket Validation")
+                st.dataframe(summary, use_container_width=True)
+
+                average_return_chart = summary.pivot(
+                    index="score_bucket",
+                    columns="horizon",
+                    values="average_return_pct",
+                )
+                st.subheader("Score Bucket vs Return")
+                st.bar_chart(average_return_chart)
+
+                win_rate_chart = summary.pivot(
+                    index="score_bucket",
+                    columns="horizon",
+                    values="win_rate_pct",
+                )
+                st.subheader("Score Bucket vs Win Rate")
+                st.bar_chart(win_rate_chart)
+
+                st.subheader("Calibration Curve")
+                st.dataframe(calibration, use_container_width=True)
+                calibration_horizon = st.selectbox(
+                    "Calibration horizon",
+                    ["1 month", "3 months", "6 months", "12 months"],
+                )
+                calibration_chart = (
+                    calibration[calibration["horizon"] == calibration_horizon]
+                    .set_index("score_bucket")[
+                        [
+                            "average_predicted_return_pct",
+                            "average_actual_return_pct",
+                        ]
+                    ]
+                    .rename(
+                        columns={
+                            "average_predicted_return_pct": "Predicted return",
+                            "average_actual_return_pct": "Actual return",
+                        }
+                    )
+                )
+                st.line_chart(calibration_chart)
+
+                st.subheader("Prediction Observations")
+                st.dataframe(frame, use_container_width=True)
         st.caption(ADVICE_WARNING)
 
 

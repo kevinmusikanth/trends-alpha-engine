@@ -9,6 +9,11 @@ from tae.forecasting.backtest import (
     prediction_test_summary,
 )
 from tae.forecasting.engine import build_forecast_report
+from tae.forecasting.outcomes import (
+    investment_outcome_projection,
+    outcome_growth_paths,
+    projected_value,
+)
 from tae.scoring.engine import score_ticker
 
 
@@ -36,6 +41,41 @@ def test_forecast_explanation_has_drivers_and_data_quality():
     assert report.top_negative_drivers
     assert "fallback_data_used" in report.data_quality
     assert "sample_fundamentals_used" in report.data_quality
+
+
+def test_investment_outcome_projection_uses_forecast_scenarios():
+    prices = sample_price_history(periods=300)
+    score = score_ticker("AAPL", prices, fallback_data_used=True)
+    report = build_forecast_report(score, prices)
+
+    outcomes = investment_outcome_projection(report, 10000)
+    paths = outcome_growth_paths(outcomes, 10000)
+
+    assert list(outcomes["horizon"]) == [
+        "1 Month",
+        "3 Months",
+        "12 Months",
+        "3 Years",
+        "5 Years",
+    ]
+    assert {
+        "bear_case_value",
+        "base_case_value",
+        "bull_case_value",
+        "expected_value",
+        "expected_cagr_pct",
+        "probability_positive_return_pct",
+        "probability_losing_money_pct",
+    }.issubset(outcomes.columns)
+    assert outcomes["bear_case_value"].le(outcomes["base_case_value"]).all()
+    assert outcomes["base_case_value"].le(outcomes["bull_case_value"]).all()
+    assert paths.iloc[0]["Bear"] == 10000
+    assert {"Bear", "Base", "Bull"}.issubset(paths.columns)
+
+
+def test_projected_value_compounds_cagr_horizons():
+    assert projected_value(10000, 10, years=5, is_cagr=True) == 16105.1
+    assert projected_value(10000, 10, years=5, is_cagr=False) == 11000
 
 
 def test_actual_forward_return_uses_requested_horizon():
