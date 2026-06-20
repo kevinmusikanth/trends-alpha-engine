@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inspect import signature
+
 import pandas as pd
 import streamlit as st
 
@@ -48,6 +50,38 @@ def safe_price_history(
 
     return sample_price_history(start=start, end=end), True
 
+
+def quality_for_display(score, prices: pd.DataFrame, is_fallback: bool) -> dict[str, object]:
+    quality = getattr(score, "data_quality", None)
+    if quality:
+        return {
+            "live_price_data_available": bool(quality.get("live_price_data_available")),
+            "fundamental_data_available": bool(quality.get("fundamental_data_available")),
+            "fallback_data_used": bool(quality.get("fallback_data_used")),
+            "sample_fundamentals_used": bool(quality.get("sample_fundamentals_used")),
+            "missing_metrics": list(quality.get("missing_metrics", [])),
+        }
+
+    return {
+        "live_price_data_available": not prices.empty and not is_fallback,
+        "fundamental_data_available": False,
+        "fallback_data_used": is_fallback,
+        "sample_fundamentals_used": False,
+        "missing_metrics": ["fundamental data quality metadata unavailable"],
+    }
+
+
+def score_for_app(ticker: str, prices: pd.DataFrame, is_fallback: bool):
+    parameters = signature(score_ticker).parameters
+    kwargs = {}
+    if "live_price_data_available" in parameters:
+        kwargs["live_price_data_available"] = not is_fallback
+    if "fallback_data_used" in parameters:
+        kwargs["fallback_data_used"] = is_fallback
+
+    score = score_ticker(ticker, prices, **kwargs)
+    return score, quality_for_display(score, prices, is_fallback)
+
 tab_screener, tab_backtest, tab_watchlist, tab_portfolio = st.tabs(
     ["Screener", "Backtesting", "Watchlist", "Portfolio Testing"]
 )
@@ -58,13 +92,8 @@ with tab_screener:
         prices, is_fallback = safe_price_history(ticker, period="1y")
         if is_fallback:
             st.warning(YAHOO_WARNING)
-        score = score_ticker(
-            ticker,
-            prices,
-            live_price_data_available=not is_fallback,
-            fallback_data_used=is_fallback,
-        )
-        if score.data_quality["sample_fundamentals_used"]:
+        score, quality = score_for_app(ticker, prices, is_fallback)
+        if quality["sample_fundamentals_used"]:
             st.warning("Sample fundamentals used")
         cols = st.columns(6)
         cols[0].metric("Short-term trading score", score.short_score)
@@ -75,7 +104,6 @@ with tab_screener:
         cols[5].metric("Label", score.recommendation)
 
         st.subheader("Data Quality")
-        quality = score.data_quality
         quality_cols = st.columns(4)
         quality_cols[0].metric(
             "Live price data available",
