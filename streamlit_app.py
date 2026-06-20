@@ -22,6 +22,13 @@ from tae.forecasting.alpha_validation import (
 from tae.forecasting.backtest import prediction_test_frame, prediction_test_summary
 from tae.forecasting.engine import build_forecast_report
 from tae.forecasting.outcomes import investment_outcome_projection, outcome_growth_paths
+from tae.forecasting.point_in_time import (
+    forecast_calibration as pit_forecast_calibration,
+    investment_outcome_validation,
+    point_in_time_prediction_frame,
+    prediction_accuracy_metrics,
+    score_threshold_validation,
+)
 from tae.forecasting.universe import (
     universe_bucket_summary,
     universe_calibration_curve,
@@ -256,6 +263,7 @@ def load_price_histories_for_tickers(
     tab_forecast,
     tab_prediction,
     tab_validation,
+    tab_prediction_accuracy,
     tab_alpha_validation,
     tab_universe,
     tab_backtest,
@@ -267,6 +275,7 @@ def load_price_histories_for_tickers(
         "Forecast",
         "Prediction Testing",
         "Validation Dashboard",
+        "Prediction Accuracy Dashboard",
         "ALPHA VALIDATION",
         "Universe Backtest",
         "Backtesting",
@@ -502,6 +511,194 @@ with tab_validation:
             st.dataframe(importance_frame, use_container_width=True)
             if not importance_frame.empty:
                 st.bar_chart(importance_frame.set_index("factor")["importance"])
+        st.caption(ADVICE_WARNING)
+
+
+with tab_prediction_accuracy:
+    pit_universe_choice = st.selectbox(
+        "Point-in-time universe",
+        ["S&P 500", "Nasdaq 100", "Custom tickers"],
+    )
+    pit_custom_universe = ""
+    if pit_universe_choice == "Custom tickers":
+        pit_custom_universe = st.text_area(
+            "Point-in-time custom tickers",
+            value="AAPL, MSFT, NVDA, AMZN, META",
+        )
+    pit_start = st.text_input("Point-in-time start date", value="2018-01-01")
+    pit_max_tickers = st.number_input(
+        "Point-in-time maximum tickers",
+        min_value=1,
+        max_value=100,
+        value=5,
+        step=1,
+    )
+    pit_step_days = st.number_input(
+        "Point-in-time historical date step",
+        min_value=1,
+        max_value=252,
+        value=21,
+        step=1,
+    )
+    pit_investment_cols = st.columns([2, 1])
+    pit_investment_amount = pit_investment_cols[0].number_input(
+        "Point-in-time investment amount",
+        min_value=0.0,
+        value=10.0,
+        step=10.0,
+    )
+    pit_currency = pit_investment_cols[1].selectbox(
+        "Point-in-time currency",
+        ["$", "£", "€", "R"],
+    )
+
+    if st.button("Run point-in-time validation"):
+        if pit_universe_choice == "S&P 500":
+            pit_tickers = get_universe("sp500")
+        elif pit_universe_choice == "Nasdaq 100":
+            pit_tickers = get_universe("nasdaq100")
+        else:
+            pit_tickers = custom_tickers_from_text(pit_custom_universe)
+
+        pit_tickers = pit_tickers[: int(pit_max_tickers)]
+        if not pit_tickers:
+            st.warning("Add at least one ticker to run point-in-time validation.")
+        else:
+            pit_prices, pit_fallback_flags = load_price_histories_for_tickers(
+                pit_tickers,
+                start="2013-01-01",
+            )
+            if any(pit_fallback_flags.values()):
+                st.warning(YAHOO_WARNING)
+            st.info(
+                "Point-in-time mode disables sample fundamentals so historical scores "
+                "are reconstructed from data available up to each test date."
+            )
+
+            pit_frame = point_in_time_prediction_frame(
+                pit_prices,
+                start_date=pit_start,
+                fallback_data_used_by_ticker=pit_fallback_flags,
+                step_days=int(pit_step_days),
+            )
+            accuracy = prediction_accuracy_metrics(pit_frame)
+            threshold_frame = score_threshold_validation(pit_frame)
+            calibration_frame = pit_forecast_calibration(pit_frame)
+
+            spy_prices, _ = safe_price_history("SPY", start="2013-01-01")
+            qqq_prices, _ = safe_price_history("QQQ", start="2013-01-01")
+            pit_benchmarks = {
+                "S&P 500": benchmark_return_frame(
+                    "S&P 500",
+                    spy_prices,
+                    start_date=pit_start,
+                    step_days=int(pit_step_days),
+                ),
+                "Nasdaq 100": benchmark_return_frame(
+                    "Nasdaq 100",
+                    qqq_prices,
+                    start_date=pit_start,
+                    step_days=int(pit_step_days),
+                ),
+            }
+            outcome_frame = investment_outcome_validation(
+                pit_frame,
+                pit_investment_amount,
+                benchmarks=pit_benchmarks,
+            )
+
+            st.subheader("Prediction Accuracy Dashboard")
+            coverage = st.columns(4)
+            coverage[0].metric("Tickers", len(pit_tickers))
+            coverage[1].metric("Observations", len(pit_frame))
+            coverage[2].metric(
+                "Fallback tickers",
+                sum(1 for value in pit_fallback_flags.values() if value),
+            )
+            coverage[3].metric(
+                "Sample fundamentals used",
+                yes_no(
+                    bool(
+                        not pit_frame.empty
+                        and pit_frame["sample_fundamentals_used"].any()
+                    )
+                ),
+            )
+
+            if pit_frame.empty:
+                st.warning("Not enough future history to validate these horizons.")
+            else:
+                accuracy_cols = st.columns(5)
+                accuracy_cols[0].metric(
+                    "Average error",
+                    f"{accuracy['average_prediction_error_pct']:.1f}%",
+                )
+                accuracy_cols[1].metric(
+                    "Median error",
+                    f"{accuracy['median_prediction_error_pct']:.1f}%",
+                )
+                accuracy_cols[2].metric("RMSE", f"{accuracy['rmse_pct']:.1f}%")
+                accuracy_cols[3].metric(
+                    "Forecast/actual correlation",
+                    f"{accuracy['forecast_actual_correlation']:.3f}",
+                )
+                accuracy_cols[4].metric(
+                    "Calibration accuracy",
+                    f"{accuracy['calibration_accuracy_pct']:.1f}%",
+                )
+
+                st.subheader("Score Threshold Validation")
+                st.dataframe(threshold_frame, use_container_width=True)
+                if not threshold_frame.empty:
+                    st.bar_chart(
+                        threshold_frame.pivot_table(
+                            index="threshold",
+                            columns="horizon",
+                            values="average_actual_return_pct",
+                        )
+                    )
+
+                st.subheader("Investment Outcome Validation")
+                outcome_display = outcome_frame.copy()
+                money_columns = [
+                    column
+                    for column in outcome_display.columns
+                    if "value" in column or column == "total_invested"
+                ]
+                for column in money_columns:
+                    outcome_display[column] = outcome_display[column].map(
+                        lambda value: format_money(value, pit_currency)
+                    )
+                st.dataframe(outcome_display, use_container_width=True)
+
+                st.subheader("Forecast Calibration")
+                st.dataframe(calibration_frame, use_container_width=True)
+                if not calibration_frame.empty:
+                    calibration_horizon = st.selectbox(
+                        "Point-in-time calibration horizon",
+                        ["1 week", "1 month", "3 months", "6 months", "12 months", "3 years", "5 years"],
+                    )
+                    calibration_chart = (
+                        calibration_frame[
+                            calibration_frame["horizon"] == calibration_horizon
+                        ]
+                        .set_index("forecast_bucket")[
+                            [
+                                "average_forecast_return_pct",
+                                "average_actual_return_pct",
+                            ]
+                        ]
+                        .rename(
+                            columns={
+                                "average_forecast_return_pct": "Forecast",
+                                "average_actual_return_pct": "Actual",
+                            }
+                        )
+                    )
+                    st.line_chart(calibration_chart)
+
+                st.subheader("Point-in-Time Prediction Records")
+                st.dataframe(pit_frame, use_container_width=True)
         st.caption(ADVICE_WARNING)
 
 

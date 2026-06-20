@@ -342,6 +342,7 @@ def build_feature_set(
     ticker: str,
     price_features: dict[str, float | None],
     manual_features: dict[str, float | None] | None = None,
+    use_sample_fundamentals: bool = True,
 ) -> FeatureSet:
     values = dict(price_features)
     supplied = manual_features or {}
@@ -353,7 +354,7 @@ def build_feature_set(
     sample = SAMPLE_FUNDAMENTALS.get(ticker.upper())
     sample_used = False
 
-    if not has_supplied_fundamentals and sample:
+    if use_sample_fundamentals and not has_supplied_fundamentals and sample:
         values.update(sample)
         sample_used = True
 

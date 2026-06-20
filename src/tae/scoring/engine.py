@@ -84,10 +84,16 @@ def score_ticker(
     manual_features: dict[str, float | None] | None = None,
     live_price_data_available: bool | None = None,
     fallback_data_used: bool = False,
+    use_sample_fundamentals: bool = True,
 ) -> ScoreResult:
     validate_weights()
     price_features = extract_price_features(price_history)
-    feature_set = build_feature_set(ticker, price_features, manual_features)
+    feature_set = build_feature_set(
+        ticker,
+        price_features,
+        manual_features,
+        use_sample_fundamentals=use_sample_fundamentals,
+    )
     features = feature_set.values
 
     short_score, short_components = score_model_a(features)

@@ -106,3 +106,18 @@ def test_requested_mega_cap_sample_fundamentals_are_complete():
     for ticker in tickers:
         assert ticker in SAMPLE_FUNDAMENTALS
         assert FUNDAMENTAL_FEATURE_KEYS.issubset(SAMPLE_FUNDAMENTALS[ticker])
+
+
+def test_score_ticker_can_disable_sample_fundamentals_for_point_in_time_validation():
+    prices = sample_price_history(periods=260)
+    score = score_ticker(
+        "META",
+        prices,
+        live_price_data_available=False,
+        fallback_data_used=True,
+        use_sample_fundamentals=False,
+    )
+
+    assert score.data_quality["sample_fundamentals_used"] is False
+    assert score.data_quality["fundamental_data_available"] is False
+    assert score.long_score == 0
