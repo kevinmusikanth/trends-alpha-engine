@@ -10,6 +10,14 @@ from tae.connectors.fallback import sample_price_history
 from tae.connectors.yahoo import YahooFinanceConnector
 from tae.forecasting.backtest import prediction_test_frame, prediction_test_summary
 from tae.forecasting.engine import build_forecast_report
+from tae.forecasting.validation import (
+    confidence_calibration,
+    feature_importance,
+    forecast_calibration,
+    model_quality_metrics,
+    score_bucket_analysis,
+    validation_frame,
+)
 from tae.scoring.engine import score_ticker
 from tae.universe import get_universe
 
@@ -139,11 +147,20 @@ def display_forecast_report(score, prices: pd.DataFrame) -> None:
     )
 
 
-tab_screener, tab_forecast, tab_prediction, tab_backtest, tab_watchlist, tab_portfolio = st.tabs(
+(
+    tab_screener,
+    tab_forecast,
+    tab_prediction,
+    tab_validation,
+    tab_backtest,
+    tab_watchlist,
+    tab_portfolio,
+) = st.tabs(
     [
         "Screener",
         "Forecast",
         "Prediction Testing",
+        "Validation Dashboard",
         "Backtesting",
         "Watchlist",
         "Portfolio Testing",
@@ -274,6 +291,105 @@ with tab_prediction:
             st.bar_chart(calibration)
 
             st.dataframe(frame, use_container_width=True)
+        st.caption(ADVICE_WARNING)
+
+
+with tab_validation:
+    validation_ticker = st.text_input("Validation ticker", value="MSFT").upper().strip()
+    validation_start = st.text_input("Validation start date", value="2020-01-01")
+    if st.button("Run model validation"):
+        prices, is_fallback = safe_price_history(validation_ticker, start="2018-01-01")
+        if is_fallback:
+            st.warning(YAHOO_WARNING)
+        frame = validation_frame(
+            validation_ticker,
+            prices,
+            start_date=validation_start,
+            fallback_data_used=is_fallback,
+        )
+        quality = model_quality_metrics(frame)
+        metric_cols = st.columns(5)
+        metric_cols[0].metric("R squared", f"{quality['r_squared']:.3f}")
+        metric_cols[1].metric("MAE", f"{quality['mean_absolute_error_pct']:.1f}%")
+        metric_cols[2].metric("RMSE", f"{quality['rmse_pct']:.1f}%")
+        metric_cols[3].metric("Hit rate", f"{quality['hit_rate_pct']:.1f}%")
+        metric_cols[4].metric("Sharpe", f"{quality['sharpe_ratio']:.2f}")
+
+        metric_cols_2 = st.columns(4)
+        metric_cols_2[0].metric("Sortino", f"{quality['sortino_ratio']:.2f}")
+        metric_cols_2[1].metric(
+            "Information ratio",
+            f"{quality['information_ratio']:.2f}",
+        )
+        metric_cols_2[2].metric(
+            "Maximum drawdown",
+            f"{quality['maximum_drawdown_pct']:.1f}%",
+        )
+        metric_cols_2[3].metric(
+            "Calibration error",
+            f"{quality['calibration_error_pct']:.1f}%",
+        )
+
+        st.metric("Predictive power", quality["predictive_power"])
+        if quality["recalibration_flag"]:
+            st.warning(quality["recalibration_flag"])
+            st.write("Reasons")
+            st.write(quality["recalibration_reasons"])
+
+        if frame.empty:
+            st.warning("Not enough validation history for this ticker/date.")
+        else:
+            bucket_frame = score_bucket_analysis(frame)
+            calibration_frame = forecast_calibration(frame)
+            confidence_frame = confidence_calibration(frame)
+            importance_frame = feature_importance(frame)
+
+            st.subheader("Score Bucket Analysis")
+            st.dataframe(bucket_frame, use_container_width=True)
+            if not bucket_frame.empty:
+                chart = bucket_frame.pivot(
+                    index="score_bucket",
+                    columns="horizon",
+                    values="average_forward_return_pct",
+                )
+                st.subheader("Score Bucket Returns")
+                st.bar_chart(chart)
+
+            st.subheader("Predicted vs Actual")
+            st.line_chart(
+                frame.set_index("date")[["predicted_return", "actual_return"]] * 100
+            )
+
+            st.subheader("Forecast Calibration")
+            st.dataframe(calibration_frame, use_container_width=True)
+            if not calibration_frame.empty:
+                calibration_chart = calibration_frame.pivot(
+                    index="forecast_bucket",
+                    columns="horizon",
+                    values="average_actual_return_pct",
+                )
+                st.subheader("Calibration Curve")
+                st.line_chart(calibration_chart)
+
+            st.subheader("Rolling Model Accuracy")
+            rolling = frame[["date", "hit"]].copy()
+            rolling["rolling_accuracy_pct"] = rolling["hit"].rolling(8).mean() * 100
+            st.line_chart(rolling.set_index("date")["rolling_accuracy_pct"])
+
+            st.subheader("Confidence Calibration")
+            st.dataframe(confidence_frame, use_container_width=True)
+            if not confidence_frame.empty:
+                confidence_chart = confidence_frame.pivot(
+                    index="confidence_bucket",
+                    columns="horizon",
+                    values="actual_hit_rate_pct",
+                )
+                st.bar_chart(confidence_chart)
+
+            st.subheader("Feature Importance")
+            st.dataframe(importance_frame, use_container_width=True)
+            if not importance_frame.empty:
+                st.bar_chart(importance_frame.set_index("factor")["importance"])
         st.caption(ADVICE_WARNING)
 
 

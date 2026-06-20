@@ -4,7 +4,7 @@ import pandas as pd
 
 from tae.backtesting.engine import score_band
 from tae.backtesting.metrics import max_drawdown, sharpe_ratio
-from tae.forecasting.engine import build_forecast_report
+from tae.forecasting.engine import build_forecast_report, component_exposure, factor_exposures
 from tae.forecasting.models import TRADING_DAYS
 from tae.scoring.engine import score_ticker
 
@@ -58,6 +58,8 @@ def prediction_test_frame(
             fallback_data_used=fallback_data_used,
         )
         report = build_forecast_report(score, historical_prices)
+        exposures = factor_exposures(score)
+        detailed_exposures = detailed_factor_exposures(score)
         forecast = next(line for line in report.forecasts if line.horizon == horizon)
         actual = actual_forward_return(prices, as_of_date, horizon)
         if actual is None:
@@ -75,9 +77,67 @@ def prediction_test_frame(
                 "hit": hit,
                 "confidence_pct": forecast.confidence_pct,
                 "confidence_bucket": confidence_bucket(forecast.confidence_pct),
+                **{
+                    f"factor_{factor}": exposure
+                    for factor, exposure in exposures.items()
+                },
+                **{
+                    f"detailed_factor_{factor}": exposure
+                    for factor, exposure in detailed_exposures.items()
+                },
             }
         )
     return pd.DataFrame(rows)
+
+
+def detailed_factor_exposures(score) -> dict[str, float]:
+    return {
+        "momentum": exposures_or_default(score.short_score / 100),
+        "relative_strength": average(
+            component_exposure(score, "short_term_alpha", "Relative Strength"),
+            component_exposure(score, "medium_term_alpha", "Relative Strength"),
+        ),
+        "volume": exposures_or_default(
+            component_exposure(score, "short_term_alpha", "Volume Surge")
+        ),
+        "revenue_growth": exposures_or_default(
+            component_exposure(score, "medium_term_alpha", "Revenue Growth")
+        ),
+        "eps_growth": exposures_or_default(
+            component_exposure(score, "medium_term_alpha", "EPS Growth")
+        ),
+        "margin_expansion": exposures_or_default(
+            component_exposure(score, "medium_term_alpha", "Margin Expansion")
+        ),
+        "roic": exposures_or_default(component_exposure(score, "long_term_compounder", "ROIC")),
+        "free_cash_flow_growth": exposures_or_default(
+            component_exposure(score, "long_term_compounder", "Free Cash Flow Growth")
+        ),
+        "institutional_buying": exposures_or_default(
+            component_exposure(score, "medium_term_alpha", "Institutional Buying")
+        ),
+        "analyst_revisions": exposures_or_default(
+            component_exposure(score, "short_term_alpha", "Analyst Revisions")
+        ),
+        "valuation": exposures_or_default(
+            component_exposure(score, "medium_term_alpha", "Valuation Reasonableness")
+        ),
+        "quality": exposures_or_default(score.long_score / 100),
+        "risk": exposures_or_default(score.risk_score / 100),
+    }
+
+
+def exposures_or_default(value: float | None, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    return float(max(0, min(1, value)))
+
+
+def average(*values: float | None) -> float:
+    present = [value for value in values if value is not None]
+    if not present:
+        return 0.0
+    return float(sum(present) / len(present))
 
 
 def prediction_test_summary(frame: pd.DataFrame) -> dict[str, float]:
@@ -109,4 +169,3 @@ def confidence_bucket(confidence: float) -> str:
     if confidence >= 40:
         return "40 to 59"
     return "Below 40"
-
