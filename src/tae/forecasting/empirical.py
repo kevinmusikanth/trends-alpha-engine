@@ -36,6 +36,7 @@ def empirical_score_bucket_forecast(
         win_rate_pct = float(win_rate(returns) * 100)
         observation_count = int(len(group))
         forecast_error_pct = empirical_forecast_error_pct(group)
+        forecast_actual_correlation_pct = empirical_forecast_actual_correlation_pct(group)
         calibration_accuracy_pct = max(0.0, 100 - forecast_error_pct)
         confidence = empirical_confidence_level(
             observation_count,
@@ -57,6 +58,7 @@ def empirical_score_bucket_forecast(
                 "confidence": confidence,
                 "preferred_forecast": observation_count >= min_observations,
                 "forecast_error_pct": forecast_error_pct,
+                "forecast_actual_correlation_pct": forecast_actual_correlation_pct,
                 "calibration_accuracy_pct": calibration_accuracy_pct,
                 "overall_calibration_accuracy_pct": overall_accuracy[
                     "calibration_accuracy_pct"
@@ -85,6 +87,7 @@ def empty_horizon_row(bucket: str, horizon: str, min_observations: int) -> dict[
         "confidence": "Low",
         "preferred_forecast": False,
         "forecast_error_pct": 100.0 if min_observations else 0.0,
+        "forecast_actual_correlation_pct": 0.0,
         "calibration_accuracy_pct": 0.0,
         "overall_calibration_accuracy_pct": 0.0,
     }
@@ -94,6 +97,19 @@ def empirical_forecast_error_pct(group: pd.DataFrame) -> float:
     if "prediction_error" not in group or group.empty:
         return 100.0
     return float(group["prediction_error"].abs().mean() * 100)
+
+
+def empirical_forecast_actual_correlation_pct(group: pd.DataFrame) -> float:
+    if group.empty or {"forecast_return", "actual_future_return"} - set(group.columns):
+        return 0.0
+    if len(group) < 2:
+        return 50.0
+    correlation = group["forecast_return"].astype(float).corr(
+        group["actual_future_return"].astype(float)
+    )
+    if pd.isna(correlation):
+        return 50.0
+    return float(max(0.0, min(100.0, (correlation + 1) * 50)))
 
 
 def empirical_confidence_level(

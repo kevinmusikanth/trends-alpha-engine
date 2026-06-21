@@ -121,19 +121,28 @@ def test_screener_row_includes_empirical_metrics():
                 "horizon": "12 months",
                 "average_return_pct": 24.0,
                 "win_rate_pct": 72.0,
+                "observation_count": 300,
                 "calibration_accuracy_pct": 80.0,
+                "forecast_actual_correlation_pct": 75.0,
+                "forecast_error_pct": 10.0,
             },
             {
                 "horizon": "3 years",
                 "average_return_pct": 90.0,
                 "win_rate_pct": 81.0,
+                "observation_count": 300,
                 "calibration_accuracy_pct": 78.0,
+                "forecast_actual_correlation_pct": 75.0,
+                "forecast_error_pct": 10.0,
             },
             {
                 "horizon": "5 years",
                 "average_return_pct": 155.0,
                 "win_rate_pct": 86.0,
+                "observation_count": 300,
                 "calibration_accuracy_pct": 76.0,
+                "forecast_actual_correlation_pct": 75.0,
+                "forecast_error_pct": 10.0,
             },
         ]
     )
@@ -145,7 +154,29 @@ def test_screener_row_includes_empirical_metrics():
     assert row["empirical_3y_return"] == 90.0
     assert row["empirical_5y_return"] == 155.0
     assert row["empirical_win_rate"] == 72.0
-    assert row["confidence_pct"] == 78.0
+    assert row["best_holding_period"] == "5 Years"
+    assert row["expected_value_12m"] == 12400.0
+    assert row["expected_value_3y"] == 19000.0
+    assert row["expected_value_5y"] == 25500.0
+    assert row["best_expected_value"] == 25500.0
+    assert row["empirical_outlook"] == "Strong Long-Term Edge"
+    assert row["confidence_pct"] == 85.65
+
+
+def test_empirical_outlook_label_rules():
+    streamlit_app = load_streamlit_app()
+
+    assert streamlit_app.empirical_outlook_label(20, 300, 85) == (
+        "Exceptional Long-Term Edge"
+    )
+    assert streamlit_app.empirical_outlook_label(20, 120, 75) == (
+        "Strong Long-Term Edge"
+    )
+    assert streamlit_app.empirical_outlook_label(18, 60, 65) == (
+        "Moderate Long-Term Edge"
+    )
+    assert streamlit_app.empirical_outlook_label(10, 60, 50) == "Weak Historical Edge"
+    assert streamlit_app.empirical_outlook_label(10, 60, 58) == "Neutral"
 
 
 def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
@@ -195,7 +226,117 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "empirical_5y_return",
         "empirical_win_rate",
         "confidence_pct",
+        "best_holding_period",
+        "expected_value_12m",
+        "expected_value_3y",
+        "expected_value_5y",
+        "best_expected_value",
+        "empirical_outlook",
     }.issubset(frame.columns)
+
+
+def test_score_multiple_tickers_can_sort_by_best_expected_value(monkeypatch):
+    streamlit_app = load_streamlit_app()
+
+    scores = {"AAPL": 60.0, "MSFT": 90.0}
+
+    def fake_safe_price_history(*args, **kwargs):
+        return streamlit_app.sample_price_history(periods=30), True
+
+    def fake_score_for_app(ticker, prices, is_fallback):
+        return SimpleNamespace(
+            ticker=ticker,
+            overall_score=scores[ticker],
+            recommendation="Watchlist",
+            short_score=scores[ticker],
+            medium_score=scores[ticker],
+            long_score=scores[ticker],
+            risk_score=20.0,
+        ), {}
+
+    def fake_empirical_score_bucket_forecast(score, validation_records, min_observations=1):
+        five_year_return = 350.0 if score == 60.0 else 10.0
+        return streamlit_app.pd.DataFrame(
+            [
+                {
+                    "horizon": "12 months",
+                    "average_return_pct": 5.0,
+                    "win_rate_pct": 60.0,
+                    "observation_count": 100,
+                    "calibration_accuracy_pct": 70.0,
+                    "forecast_actual_correlation_pct": 60.0,
+                    "forecast_error_pct": 20.0,
+                },
+                {
+                    "horizon": "3 years",
+                    "average_return_pct": 30.0,
+                    "win_rate_pct": 65.0,
+                    "observation_count": 100,
+                    "calibration_accuracy_pct": 70.0,
+                    "forecast_actual_correlation_pct": 60.0,
+                    "forecast_error_pct": 20.0,
+                },
+                {
+                    "horizon": "5 years",
+                    "average_return_pct": five_year_return,
+                    "win_rate_pct": 80.0,
+                    "observation_count": 100,
+                    "calibration_accuracy_pct": 70.0,
+                    "forecast_actual_correlation_pct": 60.0,
+                    "forecast_error_pct": 20.0,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(streamlit_app, "safe_price_history", fake_safe_price_history)
+    monkeypatch.setattr(streamlit_app, "score_for_app", fake_score_for_app)
+    monkeypatch.setattr(
+        streamlit_app,
+        "empirical_score_bucket_forecast",
+        fake_empirical_score_bucket_forecast,
+    )
+
+    frame = streamlit_app.score_multiple_tickers(
+        ["AAPL", "MSFT"],
+        streamlit_app.pd.DataFrame(),
+        sort_by="best_expected_value",
+    )
+
+    assert frame["ticker"].tolist() == ["AAPL", "MSFT"]
+
+
+def test_portfolio_builder_weights_and_summary():
+    streamlit_app = load_streamlit_app()
+    screener_frame = streamlit_app.pd.DataFrame(
+        [
+            {
+                "ticker": "AAPL",
+                "overall_score": 80.0,
+                "empirical_outlook": "Strong Long-Term Edge",
+                "expected_value_5y": 22000.0,
+                "empirical_12m_return": 20.0,
+                "empirical_3y_return": 70.0,
+                "empirical_5y_return": 120.0,
+            },
+            {
+                "ticker": "MSFT",
+                "overall_score": 40.0,
+                "empirical_outlook": "Neutral",
+                "expected_value_5y": 15000.0,
+                "empirical_12m_return": 10.0,
+                "empirical_3y_return": 30.0,
+                "empirical_5y_return": 50.0,
+            },
+        ]
+    )
+
+    portfolio = streamlit_app.portfolio_builder_frame(screener_frame)
+    summary = streamlit_app.portfolio_builder_summary(screener_frame)
+
+    assert portfolio["weight"].round(4).tolist() == [0.6667, 0.3333]
+    assert summary["strongest_holding"] == "AAPL"
+    assert summary["weakest_holding"] == "MSFT"
+    assert round(summary["expected_portfolio_12m_return"], 2) == 16.67
 
 
 def test_prediction_accuracy_dashboard_core_path_runs_with_fallback_data():

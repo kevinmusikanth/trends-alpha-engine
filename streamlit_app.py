@@ -60,6 +60,16 @@ ADVICE_WARNING = "Research tool only. Not financial advice."
 st.caption(ADVICE_WARNING)
 
 YAHOO_WARNING = "Live Yahoo data temporarily unavailable."
+DEFAULT_SCREENER_INVESTMENT = 10000.0
+SCREENER_SORT_OPTIONS = [
+    "overall_score",
+    "empirical_12m_return",
+    "empirical_3y_return",
+    "empirical_5y_return",
+    "empirical_win_rate",
+    "confidence_pct",
+    "best_expected_value",
+]
 
 
 def yes_no(value: object) -> str:
@@ -272,13 +282,85 @@ def empirical_confidence_pct(empirical_forecast: pd.DataFrame) -> float:
     ]
     if selected.empty:
         selected = empirical_forecast
-    if "calibration_accuracy_pct" in selected:
-        return float(selected["calibration_accuracy_pct"].astype(float).mean())
-    confidence_map = {"Low": 35.0, "Medium": 65.0, "High": 85.0}
-    return float(selected["confidence"].map(confidence_map).fillna(0.0).mean())
+    observation_count = float(selected["observation_count"].astype(float).median())
+    observation_score = min(100.0, observation_count / 300 * 100)
+    calibration_score = float(
+        selected.get("calibration_accuracy_pct", pd.Series([50.0])).astype(float).mean()
+    )
+    correlation_score = float(
+        selected.get("forecast_actual_correlation_pct", pd.Series([50.0])).astype(float).mean()
+    )
+    error_pct = float(selected.get("forecast_error_pct", pd.Series([50.0])).astype(float).mean())
+    error_score = max(0.0, 100 - error_pct)
+    confidence = (
+        observation_score * 0.30
+        + calibration_score * 0.30
+        + correlation_score * 0.25
+        + error_score * 0.15
+    )
+    return round(max(0.0, min(100.0, confidence)), 2)
+
+
+def expected_value_from_return(
+    return_pct: float,
+    investment_amount: float = DEFAULT_SCREENER_INVESTMENT,
+) -> float:
+    return investment_amount * (1 + return_pct / 100)
+
+
+def best_holding_period_from_returns(
+    empirical_12m_return: float,
+    empirical_3y_return: float,
+    empirical_5y_return: float,
+) -> str:
+    returns = {
+        "12 Months": empirical_12m_return,
+        "3 Years": empirical_3y_return,
+        "5 Years": empirical_5y_return,
+    }
+    return max(returns, key=returns.get)
+
+
+def empirical_outlook_label(
+    empirical_12m_return: float,
+    empirical_5y_return: float,
+    empirical_win_rate: float,
+) -> str:
+    if empirical_5y_return > 250 and empirical_win_rate > 80:
+        return "Exceptional Long-Term Edge"
+    if empirical_5y_return > 100 and empirical_win_rate > 70:
+        return "Strong Long-Term Edge"
+    if empirical_12m_return > 15 and empirical_win_rate > 60:
+        return "Moderate Long-Term Edge"
+    if empirical_win_rate < 55:
+        return "Weak Historical Edge"
+    return "Neutral"
 
 
 def screener_row_from_score(score, empirical_forecast: pd.DataFrame) -> dict[str, object]:
+    empirical_12m_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "12 months",
+        "average_return_pct",
+    )
+    empirical_3y_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "3 years",
+        "average_return_pct",
+    )
+    empirical_5y_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "5 years",
+        "average_return_pct",
+    )
+    empirical_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "12 months",
+        "win_rate_pct",
+    )
+    expected_value_12m = expected_value_from_return(empirical_12m_return)
+    expected_value_3y = expected_value_from_return(empirical_3y_return)
+    expected_value_5y = expected_value_from_return(empirical_5y_return)
     return {
         "ticker": score.ticker,
         "overall_score": score.overall_score,
@@ -287,34 +369,44 @@ def screener_row_from_score(score, empirical_forecast: pd.DataFrame) -> dict[str
         "medium_term_score": score.medium_score,
         "long_term_score": score.long_score,
         "risk_score": score.risk_score,
-        "empirical_12m_return": empirical_metric_for_horizon(
-            empirical_forecast,
-            "12 months",
-            "average_return_pct",
-        ),
-        "empirical_3y_return": empirical_metric_for_horizon(
-            empirical_forecast,
-            "3 years",
-            "average_return_pct",
-        ),
-        "empirical_5y_return": empirical_metric_for_horizon(
-            empirical_forecast,
-            "5 years",
-            "average_return_pct",
-        ),
-        "empirical_win_rate": empirical_metric_for_horizon(
-            empirical_forecast,
-            "12 months",
-            "win_rate_pct",
-        ),
+        "empirical_12m_return": empirical_12m_return,
+        "empirical_3y_return": empirical_3y_return,
+        "empirical_5y_return": empirical_5y_return,
+        "empirical_win_rate": empirical_win_rate,
         "confidence_pct": empirical_confidence_pct(empirical_forecast),
+        "best_holding_period": best_holding_period_from_returns(
+            empirical_12m_return,
+            empirical_3y_return,
+            empirical_5y_return,
+        ),
+        "expected_value_12m": expected_value_12m,
+        "expected_value_3y": expected_value_3y,
+        "expected_value_5y": expected_value_5y,
+        "best_expected_value": max(
+            expected_value_12m,
+            expected_value_3y,
+            expected_value_5y,
+        ),
+        "empirical_outlook": empirical_outlook_label(
+            empirical_12m_return,
+            empirical_5y_return,
+            empirical_win_rate,
+        ),
     }
+
+
+def sort_screener_frame(frame: pd.DataFrame, sort_by: str) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    sort_column = sort_by if sort_by in frame.columns else "overall_score"
+    return frame.sort_values(sort_column, ascending=False).reset_index(drop=True)
 
 
 def score_multiple_tickers(
     tickers: list[str],
     validation_records: pd.DataFrame,
     min_observations: int = 1,
+    sort_by: str = "overall_score",
 ) -> pd.DataFrame:
     rows = []
     for ticker in tickers:
@@ -328,10 +420,79 @@ def score_multiple_tickers(
         rows.append(screener_row_from_score(score, empirical))
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(
-        "overall_score",
-        ascending=False,
-    ).reset_index(drop=True)
+    return sort_screener_frame(pd.DataFrame(rows), sort_by)
+
+
+def best_opportunity_ticker(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return ""
+    working = frame.copy()
+    max_5y = max(float(working["empirical_5y_return"].max()), 1.0)
+    working["opportunity_score"] = (
+        working["overall_score"].astype(float) * 0.40
+        + working["confidence_pct"].astype(float) * 0.30
+        + (working["empirical_5y_return"].astype(float) / max_5y * 100) * 0.30
+    )
+    return str(working.sort_values("opportunity_score", ascending=False).iloc[0]["ticker"])
+
+
+def portfolio_builder_frame(screener_frame: pd.DataFrame) -> pd.DataFrame:
+    if screener_frame.empty:
+        return pd.DataFrame()
+    portfolio = screener_frame[
+        [
+            "ticker",
+            "overall_score",
+            "empirical_outlook",
+            "expected_value_5y",
+            "empirical_12m_return",
+            "empirical_3y_return",
+            "empirical_5y_return",
+        ]
+    ].copy()
+    total_score = float(portfolio["overall_score"].sum())
+    if total_score <= 0:
+        portfolio["weight"] = 0.0
+    else:
+        portfolio["weight"] = portfolio["overall_score"] / total_score
+    return portfolio.rename(columns={"overall_score": "score"})[
+        ["ticker", "score", "weight", "empirical_outlook", "expected_value_5y"]
+    ]
+
+
+def portfolio_builder_summary(screener_frame: pd.DataFrame) -> dict[str, object]:
+    if screener_frame.empty:
+        return {
+            "weighted_average_score": 0.0,
+            "expected_portfolio_12m_return": 0.0,
+            "expected_portfolio_3y_return": 0.0,
+            "expected_portfolio_5y_return": 0.0,
+            "strongest_holding": "",
+            "weakest_holding": "",
+        }
+    total_score = float(screener_frame["overall_score"].sum())
+    if total_score <= 0:
+        weights = pd.Series([0.0] * len(screener_frame), index=screener_frame.index)
+    else:
+        weights = screener_frame["overall_score"].astype(float) / total_score
+    return {
+        "weighted_average_score": float((screener_frame["overall_score"] * weights).sum()),
+        "expected_portfolio_12m_return": float(
+            (screener_frame["empirical_12m_return"] * weights).sum()
+        ),
+        "expected_portfolio_3y_return": float(
+            (screener_frame["empirical_3y_return"] * weights).sum()
+        ),
+        "expected_portfolio_5y_return": float(
+            (screener_frame["empirical_5y_return"] * weights).sum()
+        ),
+        "strongest_holding": str(
+            screener_frame.sort_values("overall_score", ascending=False).iloc[0]["ticker"]
+        ),
+        "weakest_holding": str(
+            screener_frame.sort_values("overall_score", ascending=True).iloc[0]["ticker"]
+        ),
+    }
 
 
 def load_price_histories_for_tickers(
@@ -480,6 +641,7 @@ def display_empirical_forecast_section(
     tab_universe,
     tab_backtest,
     tab_watchlist,
+    tab_portfolio_builder,
     tab_portfolio,
 ) = st.tabs(
     [
@@ -492,12 +654,14 @@ def display_empirical_forecast_section(
         "Universe Backtest",
         "Backtesting",
         "Watchlist",
+        "Portfolio Builder",
         "Portfolio Testing",
     ]
 )
 
 with tab_screener:
     ticker_input = st.text_input("Ticker", value="AAPL").upper().strip()
+    screener_sort_by = st.selectbox("Sort By", SCREENER_SORT_OPTIONS)
     if st.button("Score ticker", type="primary"):
         screener_tickers = custom_tickers_from_text(ticker_input)
         if not screener_tickers:
@@ -560,6 +724,7 @@ with tab_screener:
                 screener_tickers,
                 validation_records,
                 min_observations=1,
+                sort_by=screener_sort_by,
             )
             if screener_frame.empty:
                 st.warning("No screener results were generated.")
@@ -589,7 +754,45 @@ with tab_screener:
                     "Avoid Count",
                     int((screener_frame["label"] == "Avoid").sum()),
                 )
-                st.dataframe(screener_frame, use_container_width=True)
+                empirical_cols = st.columns(4)
+                empirical_cols[0].metric(
+                    "Average Empirical 12M Return",
+                    f"{screener_frame['empirical_12m_return'].mean():.1f}%",
+                )
+                empirical_cols[1].metric(
+                    "Average Empirical 5Y Return",
+                    f"{screener_frame['empirical_5y_return'].mean():.1f}%",
+                )
+                empirical_cols[2].metric(
+                    "Average Confidence",
+                    f"{screener_frame['confidence_pct'].mean():.1f}%",
+                )
+                empirical_cols[3].metric(
+                    "Best Opportunity",
+                    best_opportunity_ticker(screener_frame),
+                )
+                st.dataframe(
+                    screener_frame,
+                    use_container_width=True,
+                    column_config={
+                        "expected_value_12m": st.column_config.NumberColumn(
+                            "expected_value_12m",
+                            format="$%d",
+                        ),
+                        "expected_value_3y": st.column_config.NumberColumn(
+                            "expected_value_3y",
+                            format="$%d",
+                        ),
+                        "expected_value_5y": st.column_config.NumberColumn(
+                            "expected_value_5y",
+                            format="$%d",
+                        ),
+                        "best_expected_value": st.column_config.NumberColumn(
+                            "best_expected_value",
+                            format="$%d",
+                        ),
+                    },
+                )
                 st.download_button(
                     "Download CSV",
                     data=screener_frame.to_csv(index=False),
@@ -1384,6 +1587,73 @@ with tab_watchlist:
         "Version 1 includes watchlist data structures and score-change labels. "
         "Database-backed watchlists are the next implementation step."
     )
+
+
+with tab_portfolio_builder:
+    builder_input = st.text_area(
+        "Portfolio tickers",
+        value="AAPL,MSFT,META,NVDA,GOOGL,AMZN",
+    )
+    if st.button("Build score-weighted portfolio"):
+        builder_tickers = custom_tickers_from_text(builder_input)
+        if not builder_tickers:
+            st.warning("Enter at least one ticker.")
+        else:
+            validation_records = empirical_validation_records(
+                tuple(builder_tickers),
+                start_date="2016-01-01",
+                price_start="2013-01-01",
+                step_days=252,
+            )
+            screener_frame = score_multiple_tickers(
+                builder_tickers,
+                validation_records,
+                min_observations=1,
+                sort_by="overall_score",
+            )
+            portfolio_frame = portfolio_builder_frame(screener_frame)
+            summary = portfolio_builder_summary(screener_frame)
+
+            summary_cols = st.columns(3)
+            summary_cols[0].metric(
+                "Weighted Average Score",
+                f"{summary['weighted_average_score']:.2f}",
+            )
+            summary_cols[1].metric(
+                "Expected Portfolio 12M Return",
+                f"{summary['expected_portfolio_12m_return']:.1f}%",
+            )
+            summary_cols[2].metric(
+                "Expected Portfolio 3Y Return",
+                f"{summary['expected_portfolio_3y_return']:.1f}%",
+            )
+            holding_cols = st.columns(3)
+            holding_cols[0].metric(
+                "Expected Portfolio 5Y Return",
+                f"{summary['expected_portfolio_5y_return']:.1f}%",
+            )
+            holding_cols[1].metric("Strongest Holding", summary["strongest_holding"])
+            holding_cols[2].metric("Weakest Holding", summary["weakest_holding"])
+
+            st.dataframe(
+                portfolio_frame,
+                use_container_width=True,
+                column_config={
+                    "weight": st.column_config.NumberColumn("weight", format="%.4f"),
+                    "expected_value_5y": st.column_config.NumberColumn(
+                        "expected_value_5y",
+                        format="$%d",
+                    ),
+                },
+            )
+            st.download_button(
+                "Download Portfolio CSV",
+                data=portfolio_frame.to_csv(index=False),
+                file_name="trends_alpha_portfolio_builder.csv",
+                mime="text/csv",
+            )
+        st.caption(ADVICE_WARNING)
+
 
 with tab_portfolio:
     universe_name = st.selectbox("Universe", ["sp500", "nasdaq100", "russell2000"])
