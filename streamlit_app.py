@@ -85,6 +85,8 @@ SCREENER_SORT_OPTIONS = [
     "empirical_6w_return",
     "empirical_win_rate",
     "confidence_pct",
+    "recommended_horizon_score",
+    "risk_adjusted_return",
     "best_expected_value",
 ]
 ADVISORY_HORIZONS = [
@@ -518,26 +520,56 @@ def advisory_horizon_group(horizon: str) -> str:
     return "long-term"
 
 
-def advisory_horizon_years(horizon: str) -> float:
+def advisory_duration_penalty(horizon: str) -> float:
     return {
-        "1 week": 5 / 252,
-        "2 weeks": 10 / 252,
-        "4 weeks": 20 / 252,
-        "6 weeks": 30 / 252,
-        "3 months": 0.25,
-        "6 months": 0.50,
-        "12 months": 1.0,
-        "3 years": 3.0,
-        "5 years": 5.0,
-    }.get(horizon, 1.0)
+        "1 week": 1.0,
+        "2 weeks": 1.1,
+        "4 weeks": 1.2,
+        "6 weeks": 1.3,
+        "3 months": 1.6,
+        "6 months": 2.0,
+        "12 months": 3.0,
+        "3 years": 6.0,
+        "5 years": 10.0,
+    }.get(horizon, 3.0)
 
 
-def time_adjusted_empirical_return_pct(return_pct: float, horizon: str) -> float:
-    years = advisory_horizon_years(horizon)
-    if years <= 0:
-        return return_pct
-    time_adjustment = min(4.0, (1 / years) ** 0.5)
-    return return_pct * time_adjustment
+def confidence_score_cap(confidence_level: str) -> float:
+    if confidence_level in {"High", "Good"}:
+        return 100.0
+    if confidence_level == "Moderate":
+        return 85.0
+    return 70.0
+
+
+def normalized_advisory_score(
+    opportunity_score: float,
+    confidence_level: str,
+) -> float:
+    base_score = max(0.0, min(100.0, opportunity_score * 4.0))
+    return round(min(base_score, confidence_score_cap(confidence_level)), 2)
+
+
+def normalize_advisory_scores(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "recommended_horizon_score" not in frame.columns:
+        return frame
+    working = frame.copy()
+    raw_scores = working["recommended_horizon_score"].astype(float).clip(lower=0.0)
+    max_score = float(raw_scores.max())
+    if max_score <= 0:
+        working["advisory_score"] = 0.0
+        return working
+    normalized_scores = raw_scores / max_score * 100
+    caps = working["confidence_level"].map(confidence_score_cap).fillna(70.0)
+    working["advisory_score"] = normalized_scores.combine(caps, min).round(2)
+    working["advisory_action"] = working.apply(
+        lambda row: advisory_action(
+            float(row["advisory_score"]),
+            str(row["recommended_holding_period"]),
+        ),
+        axis=1,
+    )
+    return working
 
 
 def advisory_action(advisory_score: float, horizon: str) -> str:
@@ -602,18 +634,16 @@ def advisory_row_from_empirical(
         confidence_pct = max(0.0, min(100.0, confidence_pct))
         if observations < min_observations:
             confidence_pct *= 0.50
-        annualized_return_pct = time_adjusted_empirical_return_pct(average_return, horizon)
+        duration_penalty = advisory_duration_penalty(horizon)
         risk_adjusted_return = (
-            annualized_return_pct * (win_rate_pct / 100) * (confidence_pct / 100)
-        )
-        advisory_score = max(
-            0.0,
-            min(
-                100.0,
-                (max(0.0, risk_adjusted_return) * 2.0)
-                + (win_rate_pct * 0.25)
-                + (confidence_pct * 0.35),
-            ),
+            average_return
+            * (win_rate_pct / 100)
+            * (confidence_pct / 100)
+        ) / duration_penalty
+        confidence_level = confidence_level_from_pct(confidence_pct)
+        advisory_score = normalized_advisory_score(
+            risk_adjusted_return,
+            confidence_level,
         )
         candidates.append(
             {
@@ -621,8 +651,11 @@ def advisory_row_from_empirical(
                 "average_return_pct": average_return,
                 "win_rate_pct": win_rate_pct,
                 "confidence_pct": confidence_pct,
+                "confidence_level": confidence_level,
                 "advisory_score": round(advisory_score, 2),
+                "recommended_horizon_score": round(risk_adjusted_return, 2),
                 "risk_adjusted_return": risk_adjusted_return,
+                "duration_penalty": duration_penalty,
             }
         )
 
@@ -638,7 +671,10 @@ def advisory_row_from_empirical(
         "recommended_holding_period": best["horizon"],
         "expected_return_range": return_range,
         "historical_win_rate": round(best["win_rate_pct"], 2),
-        "confidence_level": confidence_level_from_pct(best["confidence_pct"]),
+        "confidence_level": best["confidence_level"],
+        "recommended_horizon_score": best["recommended_horizon_score"],
+        "risk_adjusted_return": round(best["risk_adjusted_return"], 2),
+        "duration_penalty": best["duration_penalty"],
         "advisory_summary": advisory_summary(ticker, action, best["horizon"], return_range),
     }
 
@@ -651,6 +687,9 @@ def empty_advisory_row(ticker: str) -> dict[str, object]:
         "expected_return_range": "0.0% to 0.0%",
         "historical_win_rate": 0.0,
         "confidence_level": "Low",
+        "recommended_horizon_score": 0.0,
+        "risk_adjusted_return": 0.0,
+        "duration_penalty": 0.0,
         "advisory_summary": (
             f"Research indicates {ticker} does not yet have enough empirical evidence "
             "for a high-confidence advisory view."
@@ -694,7 +733,12 @@ def empirical_outlook_label(
     return "Neutral"
 
 
-def screener_row_from_score(score, empirical_forecast: pd.DataFrame, prices: pd.DataFrame) -> dict[str, object]:
+def screener_row_from_score(
+    score,
+    empirical_forecast: pd.DataFrame,
+    prices: pd.DataFrame,
+    min_observations: int = 1,
+) -> dict[str, object]:
     momentum_details = momentum_explosion_details(prices)
     empirical_1w_return = empirical_metric_for_horizon(
         empirical_forecast,
@@ -776,7 +820,11 @@ def screener_row_from_score(score, empirical_forecast: pd.DataFrame, prices: pd.
     expected_value_5y = expected_value_from_return(empirical_5y_return)
     confidence_pct = empirical_confidence_pct(empirical_forecast)
     alpha_consistency = row_alpha_consistency_score(empirical_forecast)
-    advisory = advisory_row_from_empirical(score.ticker, empirical_forecast)
+    advisory = advisory_row_from_empirical(
+        score.ticker,
+        empirical_forecast,
+        min_observations=min_observations,
+    )
     master_score = master_rank_score(
         score.overall_score,
         opportunity_score,
@@ -861,10 +909,18 @@ def score_multiple_tickers(
             validation_records,
             min_observations=min_observations,
         )
-        rows.append(screener_row_from_score(score, empirical, prices))
+        rows.append(
+            screener_row_from_score(
+                score,
+                empirical,
+                prices,
+                min_observations=min_observations,
+            )
+        )
     if not rows:
         return pd.DataFrame()
-    return sort_screener_frame(pd.DataFrame(rows), sort_by)
+    frame = normalize_advisory_scores(pd.DataFrame(rows))
+    return sort_screener_frame(frame, sort_by)
 
 
 def best_opportunity_ticker(frame: pd.DataFrame) -> str:
@@ -2328,6 +2384,9 @@ with tab_advisory:
                         "expected_return_range",
                         "historical_win_rate",
                         "confidence_level",
+                        "recommended_horizon_score",
+                        "risk_adjusted_return",
+                        "duration_penalty",
                         "advisory_score",
                     ]
                 ].rename(
@@ -2338,6 +2397,9 @@ with tab_advisory:
                         "expected_return_range": "Expected Return",
                         "historical_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "recommended_horizon_score": "Horizon Score",
+                        "risk_adjusted_return": "Risk-Adjusted Return",
+                        "duration_penalty": "Duration Penalty",
                         "advisory_score": "Advisory Score",
                     }
                 )

@@ -188,6 +188,9 @@ def test_screener_row_includes_empirical_metrics():
     assert "empirical_1w_return" in row
     assert "empirical_6w_return" in row
     assert row["advisory_score"] > 0
+    assert "recommended_horizon_score" in row
+    assert "risk_adjusted_return" in row
+    assert "duration_penalty" in row
     assert row["advisory_action"] in {
         "Short-Term Opportunity",
         "Medium-Term Opportunity",
@@ -287,7 +290,85 @@ def test_research_advisory_selects_best_risk_adjusted_horizon():
     assert advisory["recommended_holding_period"] == "3 months"
     assert advisory["historical_win_rate"] == 70.0
     assert advisory["confidence_level"] in {"High", "Good", "Moderate"}
+    assert advisory["duration_penalty"] == 1.6
+    assert advisory["recommended_horizon_score"] == advisory["risk_adjusted_return"]
     assert "medium-term opportunity" in advisory["advisory_summary"]
+
+
+def test_research_advisory_uses_duration_penalty_and_confidence_caps():
+    streamlit_app = load_streamlit_app()
+
+    assert streamlit_app.advisory_duration_penalty("1 week") == 1.0
+    assert streamlit_app.advisory_duration_penalty("5 years") == 10.0
+    assert streamlit_app.normalized_advisory_score(100.0, "High") == 100.0
+    assert streamlit_app.normalized_advisory_score(100.0, "Moderate") == 85.0
+    assert streamlit_app.normalized_advisory_score(100.0, "Low") == 70.0
+
+    empirical = streamlit_app.pd.DataFrame(
+        [
+            {
+                "horizon": "6 weeks",
+                "average_return_pct": 9.0,
+                "win_rate_pct": 72.0,
+                "observation_count": 180,
+                "calibration_accuracy_pct": 82.0,
+                "forecast_actual_correlation_pct": 74.0,
+                "forecast_error_pct": 9.0,
+            },
+            {
+                "horizon": "5 years",
+                "average_return_pct": 100.0,
+                "win_rate_pct": 58.0,
+                "observation_count": 180,
+                "calibration_accuracy_pct": 52.0,
+                "forecast_actual_correlation_pct": 45.0,
+                "forecast_error_pct": 48.0,
+            },
+        ]
+    )
+
+    advisory = streamlit_app.advisory_row_from_empirical("NVDA", empirical)
+
+    assert advisory["recommended_holding_period"] == "6 weeks"
+    assert advisory["duration_penalty"] == 1.3
+
+
+def test_research_advisory_scores_are_normalized_across_candidates():
+    streamlit_app = load_streamlit_app()
+    frame = streamlit_app.pd.DataFrame(
+        [
+            {
+                "ticker": "AAPL",
+                "recommended_holding_period": "6 weeks",
+                "recommended_horizon_score": 5.0,
+                "confidence_level": "High",
+                "advisory_score": 20.0,
+                "advisory_action": "Watchlist",
+            },
+            {
+                "ticker": "MSFT",
+                "recommended_holding_period": "3 months",
+                "recommended_horizon_score": 10.0,
+                "confidence_level": "Moderate",
+                "advisory_score": 30.0,
+                "advisory_action": "Watchlist",
+            },
+            {
+                "ticker": "META",
+                "recommended_holding_period": "12 months",
+                "recommended_horizon_score": 8.0,
+                "confidence_level": "Low",
+                "advisory_score": 40.0,
+                "advisory_action": "Watchlist",
+            },
+        ]
+    )
+
+    normalized = streamlit_app.normalize_advisory_scores(frame)
+
+    assert normalized.loc[0, "advisory_score"] == 50.0
+    assert normalized.loc[1, "advisory_score"] == 85.0
+    assert normalized.loc[2, "advisory_score"] == 70.0
 
 
 def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
@@ -334,6 +415,9 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "expected_return_range",
         "historical_win_rate",
         "confidence_level",
+        "recommended_horizon_score",
+        "risk_adjusted_return",
+        "duration_penalty",
         "overall_score",
         "label",
         "short_term_score",
