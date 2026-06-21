@@ -96,6 +96,108 @@ def test_streamlit_scoring_path_handles_older_score_signature(monkeypatch):
     assert quality["fundamental_data_available"] is False
 
 
+def test_screener_ticker_input_splits_comma_separated_symbols():
+    streamlit_app = load_streamlit_app()
+
+    tickers = streamlit_app.custom_tickers_from_text("AAPL, MSFT, META, NVDA")
+
+    assert tickers == ["AAPL", "MSFT", "META", "NVDA"]
+
+
+def test_screener_row_includes_empirical_metrics():
+    streamlit_app = load_streamlit_app()
+    score = SimpleNamespace(
+        ticker="AAPL",
+        overall_score=82.5,
+        recommendation="Buy",
+        short_score=77.0,
+        medium_score=83.0,
+        long_score=88.0,
+        risk_score=18.0,
+    )
+    empirical = streamlit_app.pd.DataFrame(
+        [
+            {
+                "horizon": "12 months",
+                "average_return_pct": 24.0,
+                "win_rate_pct": 72.0,
+                "calibration_accuracy_pct": 80.0,
+            },
+            {
+                "horizon": "3 years",
+                "average_return_pct": 90.0,
+                "win_rate_pct": 81.0,
+                "calibration_accuracy_pct": 78.0,
+            },
+            {
+                "horizon": "5 years",
+                "average_return_pct": 155.0,
+                "win_rate_pct": 86.0,
+                "calibration_accuracy_pct": 76.0,
+            },
+        ]
+    )
+
+    row = streamlit_app.screener_row_from_score(score, empirical)
+
+    assert row["ticker"] == "AAPL"
+    assert row["empirical_12m_return"] == 24.0
+    assert row["empirical_3y_return"] == 90.0
+    assert row["empirical_5y_return"] == 155.0
+    assert row["empirical_win_rate"] == 72.0
+    assert row["confidence_pct"] == 78.0
+
+
+def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
+    streamlit_app = load_streamlit_app()
+
+    scores = {
+        "AAPL": 72.0,
+        "MSFT": 81.0,
+        "META": 65.0,
+    }
+
+    def fake_safe_price_history(*args, **kwargs):
+        return streamlit_app.sample_price_history(periods=30), True
+
+    def fake_score_for_app(ticker, prices, is_fallback):
+        score = SimpleNamespace(
+            ticker=ticker,
+            overall_score=scores[ticker],
+            recommendation="Buy" if scores[ticker] >= 80 else "Watchlist",
+            short_score=scores[ticker] - 1,
+            medium_score=scores[ticker],
+            long_score=scores[ticker] + 1,
+            risk_score=20.0,
+        )
+        return score, {"fallback_data_used": is_fallback}
+
+    monkeypatch.setattr(streamlit_app, "safe_price_history", fake_safe_price_history)
+    monkeypatch.setattr(streamlit_app, "score_for_app", fake_score_for_app)
+
+    frame = streamlit_app.score_multiple_tickers(
+        ["AAPL", "MSFT", "META"],
+        streamlit_app.pd.DataFrame(),
+        min_observations=1,
+    )
+
+    assert frame["ticker"].tolist() == ["MSFT", "AAPL", "META"]
+    assert {
+        "ticker",
+        "overall_score",
+        "label",
+        "short_term_score",
+        "medium_term_score",
+        "long_term_score",
+        "risk_score",
+        "empirical_12m_return",
+        "empirical_3y_return",
+        "empirical_5y_return",
+        "empirical_win_rate",
+        "confidence_pct",
+    }.issubset(frame.columns)
+
+
 def test_prediction_accuracy_dashboard_core_path_runs_with_fallback_data():
     streamlit_app = load_streamlit_app()
 

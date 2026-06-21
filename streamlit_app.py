@@ -251,6 +251,89 @@ def custom_tickers_from_text(raw_tickers: str) -> list[str]:
     return tickers
 
 
+def empirical_metric_for_horizon(
+    empirical_forecast: pd.DataFrame,
+    horizon: str,
+    column: str,
+) -> float:
+    if empirical_forecast.empty or column not in empirical_forecast:
+        return 0.0
+    row = empirical_forecast[empirical_forecast["horizon"] == horizon]
+    if row.empty:
+        return 0.0
+    return float(row.iloc[0][column])
+
+
+def empirical_confidence_pct(empirical_forecast: pd.DataFrame) -> float:
+    if empirical_forecast.empty:
+        return 0.0
+    selected = empirical_forecast[
+        empirical_forecast["horizon"].isin(["12 months", "3 years", "5 years"])
+    ]
+    if selected.empty:
+        selected = empirical_forecast
+    if "calibration_accuracy_pct" in selected:
+        return float(selected["calibration_accuracy_pct"].astype(float).mean())
+    confidence_map = {"Low": 35.0, "Medium": 65.0, "High": 85.0}
+    return float(selected["confidence"].map(confidence_map).fillna(0.0).mean())
+
+
+def screener_row_from_score(score, empirical_forecast: pd.DataFrame) -> dict[str, object]:
+    return {
+        "ticker": score.ticker,
+        "overall_score": score.overall_score,
+        "label": score.recommendation,
+        "short_term_score": score.short_score,
+        "medium_term_score": score.medium_score,
+        "long_term_score": score.long_score,
+        "risk_score": score.risk_score,
+        "empirical_12m_return": empirical_metric_for_horizon(
+            empirical_forecast,
+            "12 months",
+            "average_return_pct",
+        ),
+        "empirical_3y_return": empirical_metric_for_horizon(
+            empirical_forecast,
+            "3 years",
+            "average_return_pct",
+        ),
+        "empirical_5y_return": empirical_metric_for_horizon(
+            empirical_forecast,
+            "5 years",
+            "average_return_pct",
+        ),
+        "empirical_win_rate": empirical_metric_for_horizon(
+            empirical_forecast,
+            "12 months",
+            "win_rate_pct",
+        ),
+        "confidence_pct": empirical_confidence_pct(empirical_forecast),
+    }
+
+
+def score_multiple_tickers(
+    tickers: list[str],
+    validation_records: pd.DataFrame,
+    min_observations: int = 1,
+) -> pd.DataFrame:
+    rows = []
+    for ticker in tickers:
+        prices, is_fallback = safe_price_history(ticker, period="1y")
+        score, _quality = score_for_app(ticker, prices, is_fallback)
+        empirical = empirical_score_bucket_forecast(
+            score.overall_score,
+            validation_records,
+            min_observations=min_observations,
+        )
+        rows.append(screener_row_from_score(score, empirical))
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        "overall_score",
+        ascending=False,
+    ).reset_index(drop=True)
+
+
 def load_price_histories_for_tickers(
     tickers: list[str],
     start: str,
@@ -414,53 +497,105 @@ def display_empirical_forecast_section(
 )
 
 with tab_screener:
-    ticker = st.text_input("Ticker", value="AAPL").upper().strip()
+    ticker_input = st.text_input("Ticker", value="AAPL").upper().strip()
     if st.button("Score ticker", type="primary"):
-        prices, is_fallback = safe_price_history(ticker, period="1y")
-        if is_fallback:
-            st.warning(YAHOO_WARNING)
-        score, quality = score_for_app(ticker, prices, is_fallback)
-        if quality["sample_fundamentals_used"]:
-            st.warning("Sample fundamentals used")
-        if not quality["fundamental_data_available"]:
-            st.warning("Fundamental data missing — score incomplete")
-        cols = st.columns(6)
-        cols[0].metric("Short-term trading score", score.short_score)
-        cols[1].metric("Medium-term alpha score", score.medium_score)
-        cols[2].metric("Long-term compounder score", score.long_score)
-        cols[3].metric("Risk score", score.risk_score)
-        cols[4].metric("Overall score", score.overall_score)
-        cols[5].metric("Label", score.recommendation)
+        screener_tickers = custom_tickers_from_text(ticker_input)
+        if not screener_tickers:
+            st.warning("Enter at least one ticker.")
+        elif len(screener_tickers) == 1:
+            ticker = screener_tickers[0]
+            prices, is_fallback = safe_price_history(ticker, period="1y")
+            if is_fallback:
+                st.warning(YAHOO_WARNING)
+            score, quality = score_for_app(ticker, prices, is_fallback)
+            if quality["sample_fundamentals_used"]:
+                st.warning("Sample fundamentals used")
+            if not quality["fundamental_data_available"]:
+                st.warning("Fundamental data missing — score incomplete")
+            cols = st.columns(6)
+            cols[0].metric("Short-term trading score", score.short_score)
+            cols[1].metric("Medium-term alpha score", score.medium_score)
+            cols[2].metric("Long-term compounder score", score.long_score)
+            cols[3].metric("Risk score", score.risk_score)
+            cols[4].metric("Overall score", score.overall_score)
+            cols[5].metric("Label", score.recommendation)
 
-        display_forecast_report(score, prices)
+            display_forecast_report(score, prices)
 
-        st.subheader("Data Quality")
-        quality_cols = st.columns(4)
-        quality_cols[0].metric(
-            "Live price data available",
-            yes_no(quality["live_price_data_available"]),
-        )
-        quality_cols[1].metric(
-            "Fundamental data available",
-            yes_no(quality["fundamental_data_available"]),
-        )
-        quality_cols[2].metric("Fallback data used", yes_no(quality["fallback_data_used"]))
-        quality_cols[3].metric(
-            "Sample fundamentals used",
-            yes_no(quality["sample_fundamentals_used"]),
-        )
+            st.subheader("Data Quality")
+            quality_cols = st.columns(4)
+            quality_cols[0].metric(
+                "Live price data available",
+                yes_no(quality["live_price_data_available"]),
+            )
+            quality_cols[1].metric(
+                "Fundamental data available",
+                yes_no(quality["fundamental_data_available"]),
+            )
+            quality_cols[2].metric("Fallback data used", yes_no(quality["fallback_data_used"]))
+            quality_cols[3].metric(
+                "Sample fundamentals used",
+                yes_no(quality["sample_fundamentals_used"]),
+            )
 
-        missing = quality["missing_metrics"]
-        if missing:
-            st.write("Missing metrics")
-            st.dataframe(pd.DataFrame({"metric": missing}), use_container_width=True)
+            missing = quality["missing_metrics"]
+            if missing:
+                st.write("Missing metrics")
+                st.dataframe(pd.DataFrame({"metric": missing}), use_container_width=True)
+            else:
+                st.success("No missing metrics for this score.")
+
+            st.subheader("Component Scores")
+            for model_name, components in score.components.items():
+                st.write(model_name.replace("_", " ").title())
+                st.dataframe(pd.DataFrame(components), use_container_width=True)
         else:
-            st.success("No missing metrics for this score.")
-
-        st.subheader("Component Scores")
-        for model_name, components in score.components.items():
-            st.write(model_name.replace("_", " ").title())
-            st.dataframe(pd.DataFrame(components), use_container_width=True)
+            validation_records = empirical_validation_records(
+                tuple(screener_tickers),
+                start_date="2016-01-01",
+                price_start="2013-01-01",
+                step_days=252,
+            )
+            screener_frame = score_multiple_tickers(
+                screener_tickers,
+                validation_records,
+                min_observations=1,
+            )
+            if screener_frame.empty:
+                st.warning("No screener results were generated.")
+            else:
+                summary_cols = st.columns(6)
+                summary_cols[0].metric(
+                    "Highest Score",
+                    f"{screener_frame['overall_score'].max():.2f}",
+                )
+                summary_cols[1].metric(
+                    "Average Score",
+                    f"{screener_frame['overall_score'].mean():.2f}",
+                )
+                summary_cols[2].metric(
+                    "Strong Buy Count",
+                    int((screener_frame["label"] == "Strong Buy").sum()),
+                )
+                summary_cols[3].metric(
+                    "Buy Count",
+                    int((screener_frame["label"] == "Buy").sum()),
+                )
+                summary_cols[4].metric(
+                    "Watchlist Count",
+                    int((screener_frame["label"] == "Watchlist").sum()),
+                )
+                summary_cols[5].metric(
+                    "Avoid Count",
+                    int((screener_frame["label"] == "Avoid").sum()),
+                )
+                st.dataframe(screener_frame, use_container_width=True)
+                st.download_button(
+                    "Download CSV",
+                    data=screener_frame.to_csv(index=False),
+                    file_name="trends_alpha_screener.csv",
+                    mime="text/csv",
+                )
 
 
 with tab_forecast:
