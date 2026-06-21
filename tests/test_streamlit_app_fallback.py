@@ -205,6 +205,10 @@ def test_screener_row_includes_empirical_metrics():
     assert "compounder_expected_return" in row
     assert "compounder_expected_annualized_return" in row
     assert "risk_reward_ratio" in row
+    assert "forecast_multiplier" in row
+    assert "forecast_confidence_band" in row
+    assert "expected_benchmark_return" in row
+    assert "expected_alpha" in row
     assert row["advisory_score"] > 0
     assert "recommended_horizon_score" in row
     assert "risk_adjusted_return" in row
@@ -510,6 +514,12 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "risk_adjusted_return",
         "duration_penalty",
         "risk_reward_ratio",
+        "forecast_uniqueness_score",
+        "identical_forecast_flag",
+        "forecast_multiplier",
+        "forecast_confidence_band",
+        "expected_benchmark_return",
+        "expected_alpha",
         "overall_score",
         "label",
         "short_term_score",
@@ -542,6 +552,9 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "trading_horizon",
         "trading_expected_return",
         "trading_expected_annualized_return",
+        "trading_expected_benchmark_return",
+        "trading_expected_alpha",
+        "trading_forecast_confidence_band",
         "trading_conviction_level",
         "trading_position_size_guidance",
         "swing_score",
@@ -550,6 +563,9 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "swing_horizon",
         "swing_expected_return",
         "swing_expected_annualized_return",
+        "swing_expected_benchmark_return",
+        "swing_expected_alpha",
+        "swing_forecast_confidence_band",
         "swing_conviction_level",
         "swing_position_size_guidance",
         "compounder_score",
@@ -558,9 +574,126 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "compounder_horizon",
         "compounder_expected_return",
         "compounder_expected_annualized_return",
+        "compounder_expected_benchmark_return",
+        "compounder_expected_alpha",
+        "compounder_forecast_confidence_band",
         "compounder_conviction_level",
         "compounder_position_size_guidance",
     }.issubset(frame.columns)
+
+
+def test_security_specific_forecasts_differentiate_same_bucket_tickers(monkeypatch):
+    streamlit_app = load_streamlit_app()
+    tickers = ["AMD", "NVDA", "PANW", "CRWD"]
+
+    def fake_safe_price_history(*args, **kwargs):
+        return streamlit_app.sample_price_history(periods=260), True
+
+    def fake_score_for_app(ticker, prices, is_fallback):
+        return SimpleNamespace(
+            ticker=ticker,
+            overall_score=82.0,
+            recommendation="Buy",
+            short_score=78.0,
+            medium_score=82.0,
+            long_score=86.0,
+            risk_score=24.0,
+            components={},
+        ), {}
+
+    def fake_empirical_score_bucket_forecast(score, validation_records, min_observations=1):
+        return streamlit_app.pd.DataFrame(
+            [
+                {
+                    "horizon": "1 week",
+                    "average_return_pct": 2.0,
+                    "win_rate_pct": 58.0,
+                    "observation_count": 400,
+                    "calibration_accuracy_pct": 82.0,
+                    "forecast_actual_correlation_pct": 76.0,
+                    "forecast_error_pct": 8.0,
+                },
+                {
+                    "horizon": "3 months",
+                    "average_return_pct": 12.0,
+                    "win_rate_pct": 66.0,
+                    "observation_count": 400,
+                    "calibration_accuracy_pct": 82.0,
+                    "forecast_actual_correlation_pct": 76.0,
+                    "forecast_error_pct": 8.0,
+                },
+                {
+                    "horizon": "12 months",
+                    "average_return_pct": 22.0,
+                    "win_rate_pct": 72.0,
+                    "observation_count": 400,
+                    "calibration_accuracy_pct": 82.0,
+                    "forecast_actual_correlation_pct": 76.0,
+                    "forecast_error_pct": 8.0,
+                },
+                {
+                    "horizon": "3 years",
+                    "average_return_pct": 80.0,
+                    "win_rate_pct": 78.0,
+                    "observation_count": 400,
+                    "calibration_accuracy_pct": 82.0,
+                    "forecast_actual_correlation_pct": 76.0,
+                    "forecast_error_pct": 8.0,
+                },
+                {
+                    "horizon": "5 years",
+                    "average_return_pct": 140.0,
+                    "win_rate_pct": 84.0,
+                    "observation_count": 400,
+                    "calibration_accuracy_pct": 82.0,
+                    "forecast_actual_correlation_pct": 76.0,
+                    "forecast_error_pct": 8.0,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(streamlit_app, "safe_price_history", fake_safe_price_history)
+    monkeypatch.setattr(streamlit_app, "score_for_app", fake_score_for_app)
+    monkeypatch.setattr(
+        streamlit_app,
+        "empirical_score_bucket_forecast",
+        fake_empirical_score_bucket_forecast,
+    )
+
+    frame = streamlit_app.score_multiple_tickers(
+        tickers,
+        streamlit_app.pd.DataFrame(),
+        sort_by="forecast_uniqueness_score",
+    )
+
+    assert frame["expected_return_range"].nunique() == len(tickers)
+    assert frame["forecast_uniqueness_score"].min() == 100.0
+    assert streamlit_app.forecast_uniqueness_ratio(frame) > 90.0
+    assert not frame["identical_forecast_flag"].any()
+    assert frame["forecast_confidence_band"].isin(
+        ["Very High", "High", "Moderate", "Low"]
+    ).all()
+    assert (frame["expected_alpha"] != 0).all()
+
+
+def test_identical_security_forecasts_are_flagged():
+    streamlit_app = load_streamlit_app()
+    frame = streamlit_app.pd.DataFrame(
+        {
+            "ticker": ["AAA", "BBB", "CCC"],
+            "expected_return_range": ["10.0% to 12.0%", "10.0% to 12.0%", "7.0% to 9.0%"],
+            "trading_expected_return_range": ["2.0% to 3.0%"] * 3,
+            "swing_expected_return_range": ["5.0% to 6.0%"] * 3,
+            "compounder_expected_return_range": ["20.0% to 25.0%"] * 3,
+        }
+    )
+
+    checked = streamlit_app.apply_forecast_uniqueness_scores(frame)
+
+    assert bool(checked.loc[0, "identical_forecast_flag"]) is True
+    assert bool(checked.loc[1, "identical_forecast_flag"]) is True
+    assert bool(checked.loc[2, "identical_forecast_flag"]) is False
+    assert checked.loc[0, "forecast_uniqueness_score"] < 100.0
 
 
 def test_score_multiple_tickers_can_sort_by_best_expected_value(monkeypatch):

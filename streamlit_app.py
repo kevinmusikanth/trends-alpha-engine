@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from inspect import signature
 
 import pandas as pd
@@ -98,6 +99,8 @@ SCREENER_SORT_OPTIONS = [
     "compounder_expected_return",
     "advisory_percentile",
     "risk_reward_ratio",
+    "forecast_uniqueness_score",
+    "expected_alpha",
     "recommended_horizon_score",
     "risk_adjusted_return",
     "best_expected_value",
@@ -563,6 +566,171 @@ BEST_IDEAS_PORTFOLIO_ALLOCATIONS = {
 }
 
 
+def stable_ticker_adjustment(ticker: str) -> float:
+    digest = hashlib.sha256(ticker.upper().encode("utf-8")).hexdigest()
+    value = int(digest[:8], 16) / 0xFFFFFFFF
+    return (value - 0.5) * 0.05
+
+
+def score_component_percent(
+    score,
+    model_key: str,
+    component_name: str,
+    default: float = 50.0,
+) -> float:
+    for component in getattr(score, "components", {}).get(model_key, []):
+        if component.get("name") != component_name:
+            continue
+        weight = float(component.get("weight") or 0)
+        if weight <= 0:
+            return default
+        return max(0.0, min(100.0, float(component.get("score") or 0) / weight * 100))
+    return default
+
+
+def historical_accuracy_pct(empirical_forecast: pd.DataFrame) -> float:
+    if empirical_forecast.empty:
+        return 50.0
+    calibration = empirical_forecast.get("calibration_accuracy_pct", pd.Series([50.0]))
+    error = empirical_forecast.get("forecast_error_pct", pd.Series([50.0]))
+    calibration_score = float(calibration.astype(float).mean())
+    error_score = max(0.0, 100.0 - float(error.astype(float).mean()))
+    return round(max(0.0, min(100.0, (calibration_score * 0.65) + (error_score * 0.35))), 2)
+
+
+def security_forecast_multiplier(
+    score,
+    momentum_details: dict[str, float | str],
+    empirical_forecast: pd.DataFrame,
+) -> dict[str, float]:
+    revenue_growth = score_component_percent(score, "medium_term_alpha", "Revenue Growth")
+    earnings_growth = score_component_percent(score, "medium_term_alpha", "EPS Growth")
+    institutional_quality = (
+        score_component_percent(score, "short_term_alpha", "Institutional Accumulation")
+        + score_component_percent(score, "short_term_alpha", "Analyst Revisions")
+        + score_component_percent(score, "medium_term_alpha", "Institutional Buying")
+    ) / 3
+    factors = {
+        "relative_strength_rank": float(momentum_details.get("relative_strength_score", 50.0)),
+        "volatility_rank": max(0.0, min(100.0, 100.0 - float(score.risk_score))),
+        "revenue_growth": revenue_growth,
+        "earnings_growth": earnings_growth,
+        "price_momentum": float(momentum_details.get("momentum_explosion_score", 50.0)),
+        "alpha_score": float(score.overall_score),
+        "institutional_quality_score": institutional_quality,
+        "historical_forecast_accuracy": historical_accuracy_pct(empirical_forecast),
+    }
+    composite = (
+        factors["relative_strength_rank"] * 0.15
+        + factors["volatility_rank"] * 0.10
+        + factors["revenue_growth"] * 0.14
+        + factors["earnings_growth"] * 0.14
+        + factors["price_momentum"] * 0.15
+        + factors["alpha_score"] * 0.17
+        + factors["institutional_quality_score"] * 0.10
+        + factors["historical_forecast_accuracy"] * 0.05
+    )
+    multiplier = 0.75 + (composite / 100 * 0.50) + stable_ticker_adjustment(score.ticker)
+    factors["forecast_multiplier"] = round(max(0.65, min(1.45, multiplier)), 4)
+    factors["forecast_factor_composite"] = round(composite, 2)
+    return factors
+
+
+def security_specific_return(return_pct: float, multiplier: float) -> float:
+    return round(return_pct * multiplier, 2)
+
+
+def security_specific_return_range(return_pct: float, confidence_pct: float) -> str:
+    confidence_adjustment = 1 + max(0.0, 75.0 - confidence_pct) / 250
+    spread = max(1.2, abs(return_pct) * 0.12 * confidence_adjustment)
+    return f"{return_pct - spread:.1f}% to {return_pct + spread:.1f}%"
+
+
+def empirical_horizon_evidence(empirical_forecast: pd.DataFrame, horizon: str) -> dict[str, float]:
+    if empirical_forecast.empty:
+        return {
+            "observation_count": 0.0,
+            "calibration_accuracy_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "forecast_actual_correlation_pct": 0.0,
+        }
+    selected = empirical_forecast[empirical_forecast["horizon"] == horizon]
+    if selected.empty:
+        selected = empirical_forecast
+    item = selected.iloc[0]
+    return {
+        "observation_count": float(item.get("observation_count", 0.0)),
+        "calibration_accuracy_pct": float(item.get("calibration_accuracy_pct", 0.0)),
+        "win_rate_pct": float(item.get("win_rate_pct", 0.0)),
+        "forecast_actual_correlation_pct": float(
+            item.get("forecast_actual_correlation_pct", 0.0)
+        ),
+    }
+
+
+def forecast_confidence_band(empirical_forecast: pd.DataFrame, horizon: str) -> str:
+    evidence = empirical_horizon_evidence(empirical_forecast, horizon)
+    sample_score = min(100.0, evidence["observation_count"] / 300 * 100)
+    correlation_score = max(0.0, min(100.0, evidence["forecast_actual_correlation_pct"]))
+    score_value = (
+        sample_score * 0.30
+        + evidence["calibration_accuracy_pct"] * 0.30
+        + evidence["win_rate_pct"] * 0.20
+        + correlation_score * 0.20
+    )
+    if score_value >= 80:
+        return "Very High"
+    if score_value >= 65:
+        return "High"
+    if score_value >= 50:
+        return "Moderate"
+    return "Low"
+
+
+def benchmark_expected_return_pct(horizon: str) -> float:
+    years = HORIZON_YEAR_FRACTIONS.get(horizon, 1.0)
+    annual_benchmark = 0.08
+    if years <= 1:
+        return round(annual_benchmark * years * 100, 2)
+    return round(((1 + annual_benchmark) ** years - 1) * 100, 2)
+
+
+def apply_forecast_uniqueness_scores(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    working = frame.copy()
+    signature_columns = [
+        column
+        for column in [
+            "expected_return_range",
+            "trading_expected_return_range",
+            "swing_expected_return_range",
+            "compounder_expected_return_range",
+        ]
+        if column in working.columns
+    ]
+    if not signature_columns:
+        working["forecast_uniqueness_score"] = 0.0
+        working["identical_forecast_flag"] = True
+        return working
+    signatures = working[signature_columns].astype(str).agg("|".join, axis=1)
+    counts = signatures.map(signatures.value_counts())
+    total = len(working)
+    if total <= 1:
+        uniqueness = pd.Series([100.0] * total, index=working.index)
+    else:
+        uniqueness = ((total - counts) / (total - 1) * 100).round(2)
+    working["forecast_uniqueness_score"] = uniqueness
+    working["identical_forecast_flag"] = counts > 1
+    return working
+
+
+def forecast_uniqueness_ratio(frame: pd.DataFrame) -> float:
+    if frame.empty or "forecast_uniqueness_score" not in frame.columns:
+        return 0.0
+    return round(float(frame["forecast_uniqueness_score"].mean()), 2)
+
+
 def annualized_return_pct(return_pct: float, horizon: str) -> float:
     years = HORIZON_YEAR_FRACTIONS.get(horizon, 1.0)
     if years <= 0:
@@ -687,10 +855,13 @@ def trading_advisory_fields(row: dict[str, object]) -> dict[str, object]:
             ),
         }
     )
-    momentum_score = float(row.get("momentum_explosion_score", 0.0))
+    multiplier = float(row.get("forecast_multiplier", 1.0))
+    adjusted_return = security_specific_return(expected_return, multiplier)
     confidence_pct = float(row.get("confidence_pct", 0.0))
+    benchmark_return = benchmark_expected_return_pct(horizon)
+    momentum_score = float(row.get("momentum_explosion_score", 0.0))
     score_value = (
-        max(0.0, expected_return) * 3.0
+        max(0.0, adjusted_return) * 3.0
         + win_rate * 0.30
         + momentum_score * 0.35
         + confidence_pct * 0.20
@@ -700,13 +871,18 @@ def trading_advisory_fields(row: dict[str, object]) -> dict[str, object]:
         "trading_score": trading_score,
         "trading_action": action_from_score(trading_score, "Trading Buy"),
         "trading_horizon": horizon,
-        "trading_expected_return": round(expected_return, 2),
+        "trading_expected_return": round(adjusted_return, 2),
+        "trading_expected_benchmark_return": benchmark_return,
+        "trading_expected_alpha": round(adjusted_return - benchmark_return, 2),
         "trading_expected_annualized_return": annualized_return_pct(
-            expected_return,
+            adjusted_return,
             horizon,
         ),
         "trading_win_rate": round(win_rate, 2),
-        "trading_expected_return_range": expected_return_range(expected_return),
+        "trading_expected_return_range": security_specific_return_range(
+            adjusted_return,
+            confidence_pct,
+        ),
     }
 
 
@@ -723,9 +899,12 @@ def swing_advisory_fields(row: dict[str, object]) -> dict[str, object]:
             ),
         }
     )
+    multiplier = float(row.get("forecast_multiplier", 1.0))
+    adjusted_return = security_specific_return(expected_return, multiplier)
     confidence_pct = float(row.get("confidence_pct", 0.0))
+    benchmark_return = benchmark_expected_return_pct(horizon)
     score_value = (
-        max(0.0, expected_return) * 2.0
+        max(0.0, adjusted_return) * 2.0
         + win_rate * 0.45
         + confidence_pct * 0.30
     )
@@ -734,13 +913,18 @@ def swing_advisory_fields(row: dict[str, object]) -> dict[str, object]:
         "swing_score": swing_score,
         "swing_action": action_from_score(swing_score, "Swing Buy"),
         "swing_horizon": horizon,
-        "swing_expected_return": round(expected_return, 2),
+        "swing_expected_return": round(adjusted_return, 2),
+        "swing_expected_benchmark_return": benchmark_return,
+        "swing_expected_alpha": round(adjusted_return - benchmark_return, 2),
         "swing_expected_annualized_return": annualized_return_pct(
-            expected_return,
+            adjusted_return,
             horizon,
         ),
         "swing_win_rate": round(win_rate, 2),
-        "swing_expected_return_range": expected_return_range(expected_return),
+        "swing_expected_return_range": security_specific_return_range(
+            adjusted_return,
+            confidence_pct,
+        ),
     }
 
 
@@ -761,10 +945,13 @@ def compounder_advisory_fields(row: dict[str, object]) -> dict[str, object]:
             ),
         }
     )
+    multiplier = float(row.get("forecast_multiplier", 1.0))
+    adjusted_return = security_specific_return(expected_return, multiplier)
     master_score = float(row.get("master_rank_score", 0.0))
     alpha_consistency = float(row.get("alpha_consistency_score", 0.0))
     confidence_pct = float(row.get("confidence_pct", 0.0))
-    return_score = min(100.0, max(0.0, expected_return) / 3.0)
+    benchmark_return = benchmark_expected_return_pct(horizon)
+    return_score = min(100.0, max(0.0, adjusted_return) / 3.0)
     score_value = (
         return_score * 0.35
         + master_score * 0.30
@@ -776,13 +963,18 @@ def compounder_advisory_fields(row: dict[str, object]) -> dict[str, object]:
         "compounder_score": compounder_score,
         "compounder_action": action_from_score(compounder_score, "Compounder Buy"),
         "compounder_horizon": horizon,
-        "compounder_expected_return": round(expected_return, 2),
+        "compounder_expected_return": round(adjusted_return, 2),
+        "compounder_expected_benchmark_return": benchmark_return,
+        "compounder_expected_alpha": round(adjusted_return - benchmark_return, 2),
         "compounder_expected_annualized_return": annualized_return_pct(
-            expected_return,
+            adjusted_return,
             horizon,
         ),
         "compounder_win_rate": round(win_rate, 2),
-        "compounder_expected_return_range": expected_return_range(expected_return),
+        "compounder_expected_return_range": security_specific_return_range(
+            adjusted_return,
+            confidence_pct,
+        ),
     }
 
 
@@ -1159,6 +1351,12 @@ def screener_row_from_score(
     expected_value_5y = expected_value_from_return(empirical_5y_return)
     confidence_pct = empirical_confidence_pct(empirical_forecast)
     alpha_consistency = row_alpha_consistency_score(empirical_forecast)
+    forecast_factors = security_forecast_multiplier(
+        score,
+        momentum_details,
+        empirical_forecast,
+    )
+    forecast_multiplier = forecast_factors["forecast_multiplier"]
     advisory = advisory_row_from_empirical(
         score.ticker,
         empirical_forecast,
@@ -1177,6 +1375,10 @@ def screener_row_from_score(
         recommended_horizon,
         "average_return_pct",
     )
+    recommended_expected_return = security_specific_return(
+        recommended_expected_return,
+        forecast_multiplier,
+    )
     recommended_win_rate = empirical_metric_for_horizon(
         empirical_forecast,
         recommended_horizon,
@@ -1192,11 +1394,25 @@ def screener_row_from_score(
         recommended_expected_return / historical_downside if historical_downside else 0.0,
         2,
     )
+    expected_benchmark_return = benchmark_expected_return_pct(recommended_horizon)
+    expected_alpha = round(recommended_expected_return - expected_benchmark_return, 2)
     result = {
         "ticker": score.ticker,
         "master_rank_score": master_score,
         "alpha_consistency_score": alpha_consistency,
         **advisory,
+        **forecast_factors,
+        "expected_return": recommended_expected_return,
+        "expected_return_range": security_specific_return_range(
+            recommended_expected_return,
+            confidence_pct,
+        ),
+        "expected_benchmark_return": expected_benchmark_return,
+        "expected_alpha": expected_alpha,
+        "forecast_confidence_band": forecast_confidence_band(
+            empirical_forecast,
+            recommended_horizon,
+        ),
         "overall_score": score.overall_score,
         "label": score.recommendation,
         "short_term_score": score.short_score,
@@ -1296,6 +1512,12 @@ def screener_row_from_score(
     result.update(trading_advisory_fields(result))
     result.update(swing_advisory_fields(result))
     result.update(compounder_advisory_fields(result))
+    for prefix in ("trading", "swing", "compounder"):
+        horizon = str(result.get(f"{prefix}_horizon", recommended_horizon))
+        result[f"{prefix}_forecast_confidence_band"] = forecast_confidence_band(
+            empirical_forecast,
+            horizon,
+        )
     return result
 
 
@@ -1332,6 +1554,7 @@ def score_multiple_tickers(
     if not rows:
         return pd.DataFrame()
     frame = normalize_advisory_scores(pd.DataFrame(rows))
+    frame = apply_forecast_uniqueness_scores(frame)
     return sort_screener_frame(frame, sort_by)
 
 
@@ -2947,14 +3170,18 @@ with tab_advisory:
                         "advisory_action",
                         "recommended_holding_period",
                         "expected_return_range",
+                        "expected_benchmark_return",
+                        "expected_alpha",
                         "historical_win_rate",
                         "confidence_level",
+                        "forecast_confidence_band",
                         "recommended_horizon_score",
                         "risk_adjusted_return",
                         "duration_penalty",
                         "advisory_percentile",
                         "conviction_level",
                         "position_size_guidance",
+                        "forecast_uniqueness_score",
                         "advisory_score",
                     ]
                 ].rename(
@@ -2963,14 +3190,18 @@ with tab_advisory:
                         "advisory_action": "Recommended Action",
                         "recommended_holding_period": "Holding Period",
                         "expected_return_range": "Expected Return",
+                        "expected_benchmark_return": "Benchmark Return",
+                        "expected_alpha": "Expected Alpha",
                         "historical_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "forecast_confidence_band": "Forecast Band",
                         "recommended_horizon_score": "Horizon Score",
                         "risk_adjusted_return": "Risk-Adjusted Return",
                         "duration_penalty": "Duration Penalty",
                         "advisory_percentile": "Percentile",
                         "conviction_level": "Conviction",
                         "position_size_guidance": "Position Size",
+                        "forecast_uniqueness_score": "Forecast Uniqueness",
                         "advisory_score": "Advisory Score",
                     }
                 )
@@ -3030,9 +3261,12 @@ with tab_advisory:
                         "ticker",
                         "trading_action",
                         "trading_expected_return_range",
+                        "trading_expected_benchmark_return",
+                        "trading_expected_alpha",
                         "trading_expected_annualized_return",
                         "trading_win_rate",
                         "confidence_level",
+                        "trading_forecast_confidence_band",
                         "trading_conviction_level",
                         "trading_position_size_guidance",
                         "trading_horizon",
@@ -3044,9 +3278,12 @@ with tab_advisory:
                         "ticker": "Ticker",
                         "trading_action": "Recommendation",
                         "trading_expected_return_range": "Expected Return Range",
+                        "trading_expected_benchmark_return": "Benchmark Return",
+                        "trading_expected_alpha": "Expected Alpha",
                         "trading_expected_annualized_return": "Annualized Return",
                         "trading_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "trading_forecast_confidence_band": "Forecast Band",
                         "trading_conviction_level": "Conviction",
                         "trading_position_size_guidance": "Position Size",
                         "trading_horizon": "Suggested Holding Period",
@@ -3068,9 +3305,12 @@ with tab_advisory:
                         "ticker",
                         "swing_action",
                         "swing_expected_return_range",
+                        "swing_expected_benchmark_return",
+                        "swing_expected_alpha",
                         "swing_expected_annualized_return",
                         "swing_win_rate",
                         "confidence_level",
+                        "swing_forecast_confidence_band",
                         "swing_conviction_level",
                         "swing_position_size_guidance",
                         "swing_horizon",
@@ -3082,9 +3322,12 @@ with tab_advisory:
                         "ticker": "Ticker",
                         "swing_action": "Recommendation",
                         "swing_expected_return_range": "Expected Return Range",
+                        "swing_expected_benchmark_return": "Benchmark Return",
+                        "swing_expected_alpha": "Expected Alpha",
                         "swing_expected_annualized_return": "Annualized Return",
                         "swing_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "swing_forecast_confidence_band": "Forecast Band",
                         "swing_conviction_level": "Conviction",
                         "swing_position_size_guidance": "Position Size",
                         "swing_horizon": "Suggested Holding Period",
@@ -3106,9 +3349,12 @@ with tab_advisory:
                         "ticker",
                         "compounder_action",
                         "compounder_expected_return_range",
+                        "compounder_expected_benchmark_return",
+                        "compounder_expected_alpha",
                         "compounder_expected_annualized_return",
                         "compounder_win_rate",
                         "confidence_level",
+                        "compounder_forecast_confidence_band",
                         "compounder_conviction_level",
                         "compounder_position_size_guidance",
                         "compounder_horizon",
@@ -3120,9 +3366,12 @@ with tab_advisory:
                         "ticker": "Ticker",
                         "compounder_action": "Recommendation",
                         "compounder_expected_return_range": "Expected Return Range",
+                        "compounder_expected_benchmark_return": "Benchmark Return",
+                        "compounder_expected_alpha": "Expected Alpha",
                         "compounder_expected_annualized_return": "Annualized Return",
                         "compounder_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "compounder_forecast_confidence_band": "Forecast Band",
                         "compounder_conviction_level": "Conviction",
                         "compounder_position_size_guidance": "Position Size",
                         "compounder_horizon": "Suggested Holding Period",
