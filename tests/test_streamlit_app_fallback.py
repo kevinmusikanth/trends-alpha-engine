@@ -193,14 +193,18 @@ def test_screener_row_includes_empirical_metrics():
     assert "trading_action" in row
     assert "trading_horizon" in row
     assert "trading_expected_return" in row
+    assert "trading_expected_annualized_return" in row
     assert "swing_score" in row
     assert "swing_action" in row
     assert "swing_horizon" in row
     assert "swing_expected_return" in row
+    assert "swing_expected_annualized_return" in row
     assert "compounder_score" in row
     assert "compounder_action" in row
     assert "compounder_horizon" in row
     assert "compounder_expected_return" in row
+    assert "compounder_expected_annualized_return" in row
+    assert "risk_reward_ratio" in row
     assert row["advisory_score"] > 0
     assert "recommended_horizon_score" in row
     assert "risk_adjusted_return" in row
@@ -421,9 +425,38 @@ def test_research_advisory_scores_are_normalized_across_candidates():
 
     normalized = streamlit_app.normalize_advisory_scores(frame)
 
-    assert normalized.loc[0, "advisory_score"] == 50.0
-    assert normalized.loc[1, "advisory_score"] == 85.0
-    assert normalized.loc[2, "advisory_score"] == 70.0
+    assert normalized.loc[0, "advisory_percentile"] == 0.0
+    assert normalized.loc[1, "advisory_percentile"] == 100.0
+    assert normalized.loc[2, "advisory_percentile"] == 50.0
+    assert normalized.loc[0, "advisory_score"] == 0.0
+    assert normalized.loc[1, "advisory_score"] == 100.0
+    assert normalized.loc[2, "advisory_score"] == 48.57
+    assert normalized.loc[1, "conviction_level"] == "Very High Conviction"
+    assert normalized.loc[1, "position_size_guidance"] == "8-12%"
+
+
+def test_percentile_scores_create_advisory_score_separation():
+    streamlit_app = load_streamlit_app()
+    frame = streamlit_app.pd.DataFrame(
+        {
+            "ticker": ["A", "B", "C", "D", "E"],
+            "recommended_holding_period": ["1 week"] * 5,
+            "recommended_horizon_score": [10.0, 20.0, 30.0, 40.0, 50.0],
+            "trading_score": [12.0, 24.0, 36.0, 48.0, 60.0],
+            "swing_score": [11.0, 22.0, 33.0, 44.0, 55.0],
+            "compounder_score": [9.0, 18.0, 27.0, 36.0, 45.0],
+            "confidence_level": ["High"] * 5,
+        }
+    )
+
+    normalized = streamlit_app.normalize_advisory_scores(frame)
+
+    assert normalized["advisory_percentile"].tolist() == [0.0, 25.0, 50.0, 75.0, 100.0]
+    assert normalized["advisory_score"].tolist() == [0.0, 25.0, 48.57, 70.0, 100.0]
+    assert normalized["trading_score"].tolist() == [0.0, 25.0, 48.57, 70.0, 100.0]
+    assert normalized["trading_conviction_level"].tolist()[-1] == "Very High Conviction"
+    assert normalized["trading_position_size_guidance"].tolist()[-1] == "8-12%"
+    assert normalized["advisory_score"].nunique() == 5
 
 
 def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
@@ -466,13 +499,17 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "alpha_consistency_score",
         "advisory_score",
         "advisory_action",
+        "advisory_percentile",
         "recommended_holding_period",
         "expected_return_range",
         "historical_win_rate",
         "confidence_level",
+        "conviction_level",
+        "position_size_guidance",
         "recommended_horizon_score",
         "risk_adjusted_return",
         "duration_penalty",
+        "risk_reward_ratio",
         "overall_score",
         "label",
         "short_term_score",
@@ -500,17 +537,29 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "empirical_3m_return",
         "empirical_6m_return",
         "trading_score",
+        "trading_percentile",
         "trading_action",
         "trading_horizon",
         "trading_expected_return",
+        "trading_expected_annualized_return",
+        "trading_conviction_level",
+        "trading_position_size_guidance",
         "swing_score",
+        "swing_percentile",
         "swing_action",
         "swing_horizon",
         "swing_expected_return",
+        "swing_expected_annualized_return",
+        "swing_conviction_level",
+        "swing_position_size_guidance",
         "compounder_score",
+        "compounder_percentile",
         "compounder_action",
         "compounder_horizon",
         "compounder_expected_return",
+        "compounder_expected_annualized_return",
+        "compounder_conviction_level",
+        "compounder_position_size_guidance",
     }.issubset(frame.columns)
 
 
@@ -672,6 +721,126 @@ def test_portfolio_builder_weights_and_summary():
     assert summary["weakest_holding"] == "MSFT"
     assert summary["portfolio_horizon_classification"] == "Long-Term Investment"
     assert round(summary["expected_portfolio_12m_return"], 2) == 16.67
+
+
+def test_best_ideas_portfolio_allocation_and_summary():
+    streamlit_app = load_streamlit_app()
+    screener_frame = streamlit_app.pd.DataFrame(
+        [
+            {
+                "ticker": "TRADE1",
+                "trading_score": 100.0,
+                "trading_conviction_level": "Very High Conviction",
+                "trading_expected_return": 4.0,
+                "trading_expected_return_range": "3.0% to 5.0%",
+                "trading_win_rate": 62.0,
+                "trading_horizon": "2 weeks",
+                "swing_score": 20.0,
+                "swing_conviction_level": "Avoid",
+                "swing_expected_return": 1.0,
+                "swing_expected_return_range": "0.0% to 2.0%",
+                "swing_win_rate": 50.0,
+                "swing_horizon": "3 months",
+                "compounder_score": 30.0,
+                "compounder_conviction_level": "Speculative",
+                "compounder_expected_return": 20.0,
+                "compounder_expected_return_range": "17.0% to 23.0%",
+                "compounder_win_rate": 55.0,
+                "compounder_horizon": "12 months",
+                "confidence_pct": 80.0,
+                "historical_downside": 2.0,
+            },
+            {
+                "ticker": "SWING1",
+                "trading_score": 30.0,
+                "trading_conviction_level": "Speculative",
+                "trading_expected_return": 1.0,
+                "trading_expected_return_range": "0.0% to 2.0%",
+                "trading_win_rate": 52.0,
+                "trading_horizon": "1 week",
+                "swing_score": 100.0,
+                "swing_conviction_level": "High Conviction",
+                "swing_expected_return": 12.0,
+                "swing_expected_return_range": "10.0% to 14.0%",
+                "swing_win_rate": 68.0,
+                "swing_horizon": "6 months",
+                "compounder_score": 20.0,
+                "compounder_conviction_level": "Avoid",
+                "compounder_expected_return": 15.0,
+                "compounder_expected_return_range": "13.0% to 17.0%",
+                "compounder_win_rate": 51.0,
+                "compounder_horizon": "12 months",
+                "confidence_pct": 70.0,
+                "historical_downside": 6.0,
+            },
+            {
+                "ticker": "COMP1",
+                "trading_score": 20.0,
+                "trading_conviction_level": "Avoid",
+                "trading_expected_return": 0.5,
+                "trading_expected_return_range": "-1.5% to 2.5%",
+                "trading_win_rate": 49.0,
+                "trading_horizon": "1 week",
+                "swing_score": 30.0,
+                "swing_conviction_level": "Speculative",
+                "swing_expected_return": 5.0,
+                "swing_expected_return_range": "3.0% to 7.0%",
+                "swing_win_rate": 55.0,
+                "swing_horizon": "3 months",
+                "compounder_score": 100.0,
+                "compounder_conviction_level": "Moderate Conviction",
+                "compounder_expected_return": 45.0,
+                "compounder_expected_return_range": "38.2% to 51.8%",
+                "compounder_win_rate": 75.0,
+                "compounder_horizon": "5 years",
+                "confidence_pct": 65.0,
+                "historical_downside": 15.0,
+            },
+        ]
+    )
+
+    aggressive = streamlit_app.best_ideas_portfolio_frame(
+        screener_frame,
+        "Aggressive Growth",
+        per_sleeve=1,
+    )
+    balanced = streamlit_app.best_ideas_portfolio_frame(
+        screener_frame,
+        "Balanced Growth",
+        per_sleeve=1,
+    )
+    conservative = streamlit_app.best_ideas_portfolio_frame(
+        screener_frame,
+        "Conservative Compounder",
+        per_sleeve=1,
+    )
+    summary = streamlit_app.best_ideas_portfolio_summary(aggressive)
+    buy_today = streamlit_app.best_ideas_for_today(screener_frame)
+
+    assert streamlit_app.conviction_position_size_pct("Very High Conviction") == 10.0
+    assert streamlit_app.conviction_position_size_pct("High Conviction") == 7.0
+    assert streamlit_app.conviction_position_size_pct("Moderate Conviction") == 5.0
+    assert round(float(aggressive["weight"].sum()), 2) == 100.0
+    assert aggressive.groupby("sleeve")["weight"].sum().round(2).to_dict() == {
+        "Compounder": 20.0,
+        "Swing": 30.0,
+        "Trading": 50.0,
+    }
+    assert balanced.groupby("sleeve")["weight"].sum().round(2).to_dict() == {
+        "Compounder": 40.0,
+        "Swing": 40.0,
+        "Trading": 20.0,
+    }
+    assert conservative.groupby("sleeve")["weight"].sum().round(2).to_dict() == {
+        "Compounder": 70.0,
+        "Swing": 20.0,
+        "Trading": 10.0,
+    }
+    assert round(summary["expected_portfolio_return"], 2) == 14.6
+    assert round(summary["expected_portfolio_win_rate"], 2) == 66.4
+    assert round(summary["expected_drawdown"], 2) == 5.8
+    assert round(summary["risk_reward_ratio"], 2) == 2.52
+    assert buy_today["Ticker"].tolist() == ["TRADE1", "SWING1", "COMP1"]
 
 
 def test_prediction_accuracy_dashboard_core_path_runs_with_fallback_data():

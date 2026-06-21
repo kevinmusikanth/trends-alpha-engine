@@ -88,11 +88,16 @@ SCREENER_SORT_OPTIONS = [
     "empirical_win_rate",
     "confidence_pct",
     "trading_score",
+    "trading_percentile",
     "trading_expected_return",
     "swing_score",
+    "swing_percentile",
     "swing_expected_return",
     "compounder_score",
+    "compounder_percentile",
     "compounder_expected_return",
+    "advisory_percentile",
+    "risk_reward_ratio",
     "recommended_horizon_score",
     "risk_adjusted_return",
     "best_expected_value",
@@ -520,6 +525,104 @@ def expected_return_range(return_pct: float) -> str:
     return f"{low:.1f}% to {high:.1f}%"
 
 
+HORIZON_YEAR_FRACTIONS = {
+    "1 week": 1 / 52,
+    "2 weeks": 2 / 52,
+    "4 weeks": 4 / 52,
+    "6 weeks": 6 / 52,
+    "1 month": 1 / 12,
+    "3 months": 3 / 12,
+    "6 months": 6 / 12,
+    "12 months": 1.0,
+    "3 years": 3.0,
+    "5 years": 5.0,
+}
+CONVICTION_POSITION_SIZE_PCT = {
+    "Very High Conviction": 10.0,
+    "High Conviction": 7.0,
+    "Moderate Conviction": 5.0,
+    "Speculative": 2.0,
+    "Avoid": 0.0,
+}
+BEST_IDEAS_PORTFOLIO_ALLOCATIONS = {
+    "Aggressive Growth": {
+        "Trading": 0.50,
+        "Swing": 0.30,
+        "Compounder": 0.20,
+    },
+    "Balanced Growth": {
+        "Trading": 0.20,
+        "Swing": 0.40,
+        "Compounder": 0.40,
+    },
+    "Conservative Compounder": {
+        "Trading": 0.10,
+        "Swing": 0.20,
+        "Compounder": 0.70,
+    },
+}
+
+
+def annualized_return_pct(return_pct: float, horizon: str) -> float:
+    years = HORIZON_YEAR_FRACTIONS.get(horizon, 1.0)
+    if years <= 0:
+        return round(return_pct, 2)
+    if years <= 1:
+        return round(return_pct / years, 2)
+    if return_pct <= -100:
+        return -100.0
+    return round(((1 + return_pct / 100) ** (1 / years) - 1) * 100, 2)
+
+
+def conviction_level_from_percentile(percentile: float) -> str:
+    if percentile >= 90:
+        return "Very High Conviction"
+    if percentile >= 75:
+        return "High Conviction"
+    if percentile >= 50:
+        return "Moderate Conviction"
+    if percentile >= 25:
+        return "Speculative"
+    return "Avoid"
+
+
+def position_size_from_conviction(conviction: str) -> str:
+    return {
+        "Very High Conviction": "8-12%",
+        "High Conviction": "5-8%",
+        "Moderate Conviction": "3-5%",
+        "Speculative": "1-3%",
+        "Avoid": "0%",
+    }.get(conviction, "0%")
+
+
+def conviction_position_size_pct(conviction: str) -> float:
+    return CONVICTION_POSITION_SIZE_PCT.get(conviction, 0.0)
+
+
+def score_from_percentile(percentile: float) -> float:
+    percentile = max(0.0, min(100.0, percentile))
+    if percentile >= 99:
+        return round(95 + (percentile - 99) * 5, 2)
+    if percentile >= 90:
+        return round(85 + (percentile - 90) / 9 * 10, 2)
+    if percentile >= 75:
+        return round(70 + (percentile - 75) / 15 * 15, 2)
+    if percentile >= 40:
+        return round(40 + (percentile - 40) / 35 * 30, 2)
+    return round(percentile, 2)
+
+
+def percentile_scores(values: pd.Series) -> pd.Series:
+    numeric = values.astype(float)
+    if numeric.empty:
+        return numeric
+    if len(numeric) == 1:
+        return pd.Series([100.0], index=numeric.index)
+    ranks = numeric.rank(method="average", ascending=True)
+    return ((ranks - 1) / (len(numeric) - 1) * 100).round(2)
+
+
 def action_from_score(score: float, strong_label: str) -> str:
     if score >= 80:
         return strong_label
@@ -538,6 +641,33 @@ def best_horizon_from_metrics(horizon_metrics: dict[str, tuple[float, float]]) -
         key=lambda item: item[1][0] * max(item[1][1], 0.0),
     )
     return horizon, float(values[0]), float(values[1])
+
+
+def empirical_downside_for_horizon(
+    empirical_forecast: pd.DataFrame,
+    horizon: str,
+    expected_return: float,
+    win_rate: float,
+) -> float:
+    if empirical_forecast.empty:
+        return max(1.0, abs(expected_return) * 0.40)
+    selected = empirical_forecast[empirical_forecast["horizon"] == horizon]
+    if selected.empty:
+        selected = empirical_forecast
+    item = selected.iloc[0]
+    drawdown = abs(float(item.get("maximum_drawdown_pct", item.get("max_drawdown_pct", 0.0))))
+    volatility = abs(float(item.get("volatility_pct", 0.0)))
+    error = abs(float(item.get("forecast_error_pct", 0.0)))
+    win_rate_gap = max(0.0, 50.0 - win_rate)
+    downside = max(
+        drawdown,
+        volatility * 0.50,
+        error * 0.50,
+        abs(min(0.0, expected_return)),
+        win_rate_gap * 0.30,
+        1.0,
+    )
+    return round(downside, 2)
 
 
 def trading_advisory_fields(row: dict[str, object]) -> dict[str, object]:
@@ -571,6 +701,10 @@ def trading_advisory_fields(row: dict[str, object]) -> dict[str, object]:
         "trading_action": action_from_score(trading_score, "Trading Buy"),
         "trading_horizon": horizon,
         "trading_expected_return": round(expected_return, 2),
+        "trading_expected_annualized_return": annualized_return_pct(
+            expected_return,
+            horizon,
+        ),
         "trading_win_rate": round(win_rate, 2),
         "trading_expected_return_range": expected_return_range(expected_return),
     }
@@ -601,6 +735,10 @@ def swing_advisory_fields(row: dict[str, object]) -> dict[str, object]:
         "swing_action": action_from_score(swing_score, "Swing Buy"),
         "swing_horizon": horizon,
         "swing_expected_return": round(expected_return, 2),
+        "swing_expected_annualized_return": annualized_return_pct(
+            expected_return,
+            horizon,
+        ),
         "swing_win_rate": round(win_rate, 2),
         "swing_expected_return_range": expected_return_range(expected_return),
     }
@@ -639,6 +777,10 @@ def compounder_advisory_fields(row: dict[str, object]) -> dict[str, object]:
         "compounder_action": action_from_score(compounder_score, "Compounder Buy"),
         "compounder_horizon": horizon,
         "compounder_expected_return": round(expected_return, 2),
+        "compounder_expected_annualized_return": annualized_return_pct(
+            expected_return,
+            horizon,
+        ),
         "compounder_win_rate": round(win_rate, 2),
         "compounder_expected_return_range": expected_return_range(expected_return),
     }
@@ -683,24 +825,59 @@ def normalized_advisory_score(
 
 
 def normalize_advisory_scores(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty or "recommended_horizon_score" not in frame.columns:
+    if frame.empty:
         return frame
     working = frame.copy()
-    raw_scores = working["recommended_horizon_score"].astype(float).clip(lower=0.0)
-    max_score = float(raw_scores.max())
-    if max_score <= 0:
-        working["advisory_score"] = 0.0
-        return working
-    normalized_scores = raw_scores / max_score * 100
-    caps = working["confidence_level"].map(confidence_score_cap).fillna(70.0)
-    working["advisory_score"] = normalized_scores.combine(caps, min).round(2)
-    working["advisory_action"] = working.apply(
-        lambda row: advisory_action(
-            float(row["advisory_score"]),
-            str(row["recommended_holding_period"]),
-        ),
-        axis=1,
-    )
+    ranking_pairs = [
+        ("recommended_horizon_score", "advisory_percentile", "advisory_score"),
+        ("trading_score", "trading_percentile", "trading_score"),
+        ("swing_score", "swing_percentile", "swing_score"),
+        ("compounder_score", "compounder_percentile", "compounder_score"),
+    ]
+    for raw_column, percentile_column, score_column in ranking_pairs:
+        if raw_column not in working.columns:
+            continue
+        working[percentile_column] = percentile_scores(working[raw_column])
+        working[score_column] = working[percentile_column].map(score_from_percentile)
+
+    if {"advisory_score", "recommended_holding_period"}.issubset(working.columns):
+        working["advisory_action"] = working.apply(
+            lambda row: advisory_action(
+                float(row["advisory_score"]),
+                str(row["recommended_holding_period"]),
+            ),
+            axis=1,
+        )
+    if "trading_score" in working.columns:
+        working["trading_action"] = working["trading_score"].map(
+            lambda value: action_from_score(float(value), "Trading Buy")
+        )
+    if "swing_score" in working.columns:
+        working["swing_action"] = working["swing_score"].map(
+            lambda value: action_from_score(float(value), "Swing Buy")
+        )
+    if "compounder_score" in working.columns:
+        working["compounder_action"] = working["compounder_score"].map(
+            lambda value: action_from_score(float(value), "Compounder Buy")
+        )
+    if "advisory_percentile" in working.columns:
+        working["conviction_level"] = working["advisory_percentile"].map(
+            conviction_level_from_percentile
+        )
+        working["position_size_guidance"] = working["conviction_level"].map(
+            position_size_from_conviction
+        )
+    for prefix in ("trading", "swing", "compounder"):
+        percentile_column = f"{prefix}_percentile"
+        if percentile_column not in working.columns:
+            continue
+        conviction_column = f"{prefix}_conviction_level"
+        working[conviction_column] = working[percentile_column].map(
+            conviction_level_from_percentile
+        )
+        working[f"{prefix}_position_size_guidance"] = working[conviction_column].map(
+            position_size_from_conviction
+        )
     return working
 
 
@@ -994,6 +1171,27 @@ def screener_row_from_score(
         empirical_12m_return,
         empirical_5y_return,
     )
+    recommended_horizon = str(advisory["recommended_holding_period"])
+    recommended_expected_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        recommended_horizon,
+        "average_return_pct",
+    )
+    recommended_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        recommended_horizon,
+        "win_rate_pct",
+    )
+    historical_downside = empirical_downside_for_horizon(
+        empirical_forecast,
+        recommended_horizon,
+        recommended_expected_return,
+        recommended_win_rate,
+    )
+    risk_reward_ratio = round(
+        recommended_expected_return / historical_downside if historical_downside else 0.0,
+        2,
+    )
     result = {
         "ticker": score.ticker,
         "master_rank_score": master_score,
@@ -1014,26 +1212,68 @@ def screener_row_from_score(
             score.long_score,
         ),
         "empirical_1w_return": empirical_1w_return,
+        "empirical_1w_annualized_return": annualized_return_pct(
+            empirical_1w_return,
+            "1 week",
+        ),
         "empirical_2w_return": empirical_2w_return,
+        "empirical_2w_annualized_return": annualized_return_pct(
+            empirical_2w_return,
+            "2 weeks",
+        ),
         "empirical_4w_return": empirical_4w_return,
+        "empirical_4w_annualized_return": annualized_return_pct(
+            empirical_4w_return,
+            "4 weeks",
+        ),
         "empirical_6w_return": empirical_6w_return,
+        "empirical_6w_annualized_return": annualized_return_pct(
+            empirical_6w_return,
+            "6 weeks",
+        ),
         "empirical_1w_win_rate": empirical_1w_win_rate,
         "empirical_2w_win_rate": empirical_2w_win_rate,
         "empirical_4w_win_rate": empirical_4w_win_rate,
         "empirical_6w_win_rate": empirical_6w_win_rate,
         "empirical_1m_return": empirical_1m_return,
+        "empirical_1m_annualized_return": annualized_return_pct(
+            empirical_1m_return,
+            "1 month",
+        ),
         "empirical_1m_win_rate": empirical_1m_win_rate,
         "empirical_3m_return": empirical_3m_return,
+        "empirical_3m_annualized_return": annualized_return_pct(
+            empirical_3m_return,
+            "3 months",
+        ),
         "empirical_3m_win_rate": empirical_3m_win_rate,
         "empirical_6m_return": empirical_6m_return,
+        "empirical_6m_annualized_return": annualized_return_pct(
+            empirical_6m_return,
+            "6 months",
+        ),
         "empirical_6m_win_rate": empirical_6m_win_rate,
         "empirical_12m_return": empirical_12m_return,
+        "empirical_12m_annualized_return": annualized_return_pct(
+            empirical_12m_return,
+            "12 months",
+        ),
         "empirical_3y_return": empirical_3y_return,
+        "empirical_3y_annualized_return": annualized_return_pct(
+            empirical_3y_return,
+            "3 years",
+        ),
         "empirical_3y_win_rate": empirical_3y_win_rate,
         "empirical_5y_return": empirical_5y_return,
+        "empirical_5y_annualized_return": annualized_return_pct(
+            empirical_5y_return,
+            "5 years",
+        ),
         "empirical_5y_win_rate": empirical_5y_win_rate,
         "empirical_win_rate": empirical_win_rate,
         "confidence_pct": confidence_pct,
+        "historical_downside": historical_downside,
+        "risk_reward_ratio": risk_reward_ratio,
         "best_holding_period": best_holding_period_from_returns(
             empirical_12m_return,
             empirical_3y_return,
@@ -1215,6 +1455,147 @@ def portfolio_builder_summary(
     }
 
 
+def best_ideas_category_specs() -> dict[str, dict[str, str]]:
+    return {
+        "Trading": {
+            "score": "trading_score",
+            "conviction": "trading_conviction_level",
+            "expected_return": "trading_expected_return",
+            "expected_range": "trading_expected_return_range",
+            "win_rate": "trading_win_rate",
+            "confidence": "confidence_pct",
+            "holding_period": "trading_horizon",
+        },
+        "Swing": {
+            "score": "swing_score",
+            "conviction": "swing_conviction_level",
+            "expected_return": "swing_expected_return",
+            "expected_range": "swing_expected_return_range",
+            "win_rate": "swing_win_rate",
+            "confidence": "confidence_pct",
+            "holding_period": "swing_horizon",
+        },
+        "Compounder": {
+            "score": "compounder_score",
+            "conviction": "compounder_conviction_level",
+            "expected_return": "compounder_expected_return",
+            "expected_range": "compounder_expected_return_range",
+            "win_rate": "compounder_win_rate",
+            "confidence": "confidence_pct",
+            "holding_period": "compounder_horizon",
+        },
+    }
+
+
+def best_ideas_for_today(screener_frame: pd.DataFrame) -> pd.DataFrame:
+    if screener_frame.empty:
+        return pd.DataFrame()
+    rows = []
+    for label, category, horizon_label in [
+        ("Top Trade", "Trading", "1-4 weeks"),
+        ("Top Swing", "Swing", "3-6 months"),
+        ("Top Compounder", "Compounder", "1-5 years"),
+    ]:
+        spec = best_ideas_category_specs()[category]
+        candidate = sort_screener_frame(screener_frame, spec["score"]).iloc[0]
+        rows.append(
+            {
+                "Idea": label,
+                "Ticker": candidate["ticker"],
+                "Expected Return": candidate[spec["expected_range"]],
+                "Holding Period": candidate[spec["holding_period"]],
+                "Horizon": horizon_label,
+                "Win Rate": candidate[spec["win_rate"]],
+                "Conviction": candidate[spec["conviction"]],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def best_ideas_portfolio_frame(
+    screener_frame: pd.DataFrame,
+    model: str,
+    per_sleeve: int = 5,
+) -> pd.DataFrame:
+    if screener_frame.empty:
+        return pd.DataFrame()
+    allocations = BEST_IDEAS_PORTFOLIO_ALLOCATIONS.get(
+        model,
+        BEST_IDEAS_PORTFOLIO_ALLOCATIONS["Balanced Growth"],
+    )
+    specs = best_ideas_category_specs()
+    rows = []
+    selected_tickers: set[str] = set()
+    for category, sleeve_weight in allocations.items():
+        spec = specs[category]
+        ranked = sort_screener_frame(screener_frame, spec["score"])
+        ranked = ranked[~ranked["ticker"].isin(selected_tickers)].head(per_sleeve)
+        if ranked.empty:
+            ranked = sort_screener_frame(screener_frame, spec["score"]).head(per_sleeve)
+        base_sizes = ranked[spec["conviction"]].map(conviction_position_size_pct)
+        base_total = float(base_sizes.sum())
+        if base_total <= 0:
+            base_sizes = pd.Series([1.0] * len(ranked), index=ranked.index)
+            base_total = float(base_sizes.sum())
+        for index, item in ranked.iterrows():
+            ticker = str(item["ticker"])
+            selected_tickers.add(ticker)
+            expected_return = float(item[spec["expected_return"]])
+            downside = float(item.get("historical_downside", 0.0))
+            if downside <= 0:
+                downside = max(1.0, abs(expected_return) * 0.40)
+            weight = float(sleeve_weight * (base_sizes.loc[index] / base_total) * 100)
+            rows.append(
+                {
+                    "portfolio_model": model,
+                    "sleeve": category,
+                    "ticker": ticker,
+                    "weight": weight,
+                    "conviction": item[spec["conviction"]],
+                    "position_size_basis": conviction_position_size_pct(
+                        str(item[spec["conviction"]])
+                    ),
+                    "expected_return": expected_return,
+                    "expected_return_range": item[spec["expected_range"]],
+                    "win_rate": float(item[spec["win_rate"]]),
+                    "confidence": float(item[spec["confidence"]]),
+                    "holding_period": item[spec["holding_period"]],
+                    "historical_downside": downside,
+                }
+            )
+    portfolio = pd.DataFrame(rows)
+    if portfolio.empty:
+        return portfolio
+    total_weight = float(portfolio["weight"].sum())
+    if total_weight > 0:
+        portfolio["weight"] = portfolio["weight"] / total_weight * 100
+    portfolio["weight"] = portfolio["weight"].round(2)
+    return portfolio
+
+
+def best_ideas_portfolio_summary(portfolio: pd.DataFrame) -> dict[str, float]:
+    if portfolio.empty:
+        return {
+            "expected_portfolio_return": 0.0,
+            "expected_portfolio_win_rate": 0.0,
+            "expected_drawdown": 0.0,
+            "risk_reward_ratio": 0.0,
+            "portfolio_confidence": 0.0,
+        }
+    weights = portfolio["weight"].astype(float) / 100
+    expected_return = float((portfolio["expected_return"].astype(float) * weights).sum())
+    win_rate = float((portfolio["win_rate"].astype(float) * weights).sum())
+    drawdown = float((portfolio["historical_downside"].astype(float) * weights).sum())
+    confidence = float((portfolio["confidence"].astype(float) * weights).sum())
+    return {
+        "expected_portfolio_return": expected_return,
+        "expected_portfolio_win_rate": win_rate,
+        "expected_drawdown": drawdown,
+        "risk_reward_ratio": expected_return / drawdown if drawdown else 0.0,
+        "portfolio_confidence": confidence,
+    }
+
+
 def load_price_histories_for_tickers(
     tickers: list[str],
     start: str,
@@ -1365,6 +1746,7 @@ def display_empirical_forecast_section(
     tab_backtest,
     tab_watchlist,
     tab_portfolio_builder,
+    tab_best_ideas_portfolio,
     tab_portfolio,
 ) = st.tabs(
     [
@@ -1381,6 +1763,7 @@ def display_empirical_forecast_section(
         "Backtesting",
         "Watchlist",
         "Portfolio Builder",
+        "Best Ideas Portfolio",
         "Portfolio Testing",
     ]
 )
@@ -2547,6 +2930,16 @@ with tab_advisory:
             if advisory_frame.empty:
                 st.warning("No advisory results were generated.")
             else:
+                trading_frame = sort_screener_frame(
+                    advisory_frame,
+                    "trading_score",
+                ).head(10)
+                swing_frame = sort_screener_frame(advisory_frame, "swing_score").head(10)
+                compounder_frame = sort_screener_frame(
+                    advisory_frame,
+                    "compounder_score",
+                ).head(10)
+
                 st.subheader("Research Advisory")
                 display = advisory_frame[
                     [
@@ -2559,6 +2952,9 @@ with tab_advisory:
                         "recommended_horizon_score",
                         "risk_adjusted_return",
                         "duration_penalty",
+                        "advisory_percentile",
+                        "conviction_level",
+                        "position_size_guidance",
                         "advisory_score",
                     ]
                 ].rename(
@@ -2572,23 +2968,75 @@ with tab_advisory:
                         "recommended_horizon_score": "Horizon Score",
                         "risk_adjusted_return": "Risk-Adjusted Return",
                         "duration_penalty": "Duration Penalty",
+                        "advisory_percentile": "Percentile",
+                        "conviction_level": "Conviction",
+                        "position_size_guidance": "Position Size",
                         "advisory_score": "Advisory Score",
                     }
                 )
                 st.dataframe(display, use_container_width=True)
+
+                st.subheader("Best Ideas")
+                best_ideas = pd.DataFrame(
+                    [
+                        {
+                            "Idea": "Best Trade (1-4 weeks)",
+                            "Ticker": trading_frame.iloc[0]["ticker"],
+                            "Expected Return": trading_frame.iloc[0][
+                                "trading_expected_return_range"
+                            ],
+                            "Win Rate": trading_frame.iloc[0]["trading_win_rate"],
+                            "Confidence": trading_frame.iloc[0]["confidence_level"],
+                            "Position Size": trading_frame.iloc[0][
+                                "trading_position_size_guidance"
+                            ],
+                            "Conviction": trading_frame.iloc[0]["trading_conviction_level"],
+                        },
+                        {
+                            "Idea": "Best Swing (3-6 months)",
+                            "Ticker": swing_frame.iloc[0]["ticker"],
+                            "Expected Return": swing_frame.iloc[0][
+                                "swing_expected_return_range"
+                            ],
+                            "Win Rate": swing_frame.iloc[0]["swing_win_rate"],
+                            "Confidence": swing_frame.iloc[0]["confidence_level"],
+                            "Position Size": swing_frame.iloc[0][
+                                "swing_position_size_guidance"
+                            ],
+                            "Conviction": swing_frame.iloc[0]["swing_conviction_level"],
+                        },
+                        {
+                            "Idea": "Best Compounder (1-5 years)",
+                            "Ticker": compounder_frame.iloc[0]["ticker"],
+                            "Expected Return": compounder_frame.iloc[0][
+                                "compounder_expected_return_range"
+                            ],
+                            "Win Rate": compounder_frame.iloc[0]["compounder_win_rate"],
+                            "Confidence": compounder_frame.iloc[0]["confidence_level"],
+                            "Position Size": compounder_frame.iloc[0][
+                                "compounder_position_size_guidance"
+                            ],
+                            "Conviction": compounder_frame.iloc[0][
+                                "compounder_conviction_level"
+                            ],
+                        },
+                    ]
+                )
+                st.dataframe(best_ideas, use_container_width=True)
+
                 st.subheader("Top Trading Opportunities")
-                trading_frame = sort_screener_frame(
-                    advisory_frame,
-                    "trading_score",
-                ).head(10)
                 trading_display = trading_frame[
                     [
                         "ticker",
                         "trading_action",
                         "trading_expected_return_range",
+                        "trading_expected_annualized_return",
                         "trading_win_rate",
                         "confidence_level",
+                        "trading_conviction_level",
+                        "trading_position_size_guidance",
                         "trading_horizon",
+                        "trading_percentile",
                         "trading_score",
                     ]
                 ].rename(
@@ -2596,9 +3044,13 @@ with tab_advisory:
                         "ticker": "Ticker",
                         "trading_action": "Recommendation",
                         "trading_expected_return_range": "Expected Return Range",
+                        "trading_expected_annualized_return": "Annualized Return",
                         "trading_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "trading_conviction_level": "Conviction",
+                        "trading_position_size_guidance": "Position Size",
                         "trading_horizon": "Suggested Holding Period",
+                        "trading_percentile": "Percentile",
                         "trading_score": "Trading Score",
                     }
                 )
@@ -2611,15 +3063,18 @@ with tab_advisory:
                 )
 
                 st.subheader("Top Swing Opportunities")
-                swing_frame = sort_screener_frame(advisory_frame, "swing_score").head(10)
                 swing_display = swing_frame[
                     [
                         "ticker",
                         "swing_action",
                         "swing_expected_return_range",
+                        "swing_expected_annualized_return",
                         "swing_win_rate",
                         "confidence_level",
+                        "swing_conviction_level",
+                        "swing_position_size_guidance",
                         "swing_horizon",
+                        "swing_percentile",
                         "swing_score",
                     ]
                 ].rename(
@@ -2627,9 +3082,13 @@ with tab_advisory:
                         "ticker": "Ticker",
                         "swing_action": "Recommendation",
                         "swing_expected_return_range": "Expected Return Range",
+                        "swing_expected_annualized_return": "Annualized Return",
                         "swing_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "swing_conviction_level": "Conviction",
+                        "swing_position_size_guidance": "Position Size",
                         "swing_horizon": "Suggested Holding Period",
+                        "swing_percentile": "Percentile",
                         "swing_score": "Swing Score",
                     }
                 )
@@ -2642,18 +3101,18 @@ with tab_advisory:
                 )
 
                 st.subheader("Top Long-Term Compounders")
-                compounder_frame = sort_screener_frame(
-                    advisory_frame,
-                    "compounder_score",
-                ).head(10)
                 compounder_display = compounder_frame[
                     [
                         "ticker",
                         "compounder_action",
                         "compounder_expected_return_range",
+                        "compounder_expected_annualized_return",
                         "compounder_win_rate",
                         "confidence_level",
+                        "compounder_conviction_level",
+                        "compounder_position_size_guidance",
                         "compounder_horizon",
+                        "compounder_percentile",
                         "compounder_score",
                     ]
                 ].rename(
@@ -2661,9 +3120,13 @@ with tab_advisory:
                         "ticker": "Ticker",
                         "compounder_action": "Recommendation",
                         "compounder_expected_return_range": "Expected Return Range",
+                        "compounder_expected_annualized_return": "Annualized Return",
                         "compounder_win_rate": "Historical Win Rate",
                         "confidence_level": "Confidence",
+                        "compounder_conviction_level": "Conviction",
+                        "compounder_position_size_guidance": "Position Size",
                         "compounder_horizon": "Suggested Holding Period",
+                        "compounder_percentile": "Percentile",
                         "compounder_score": "Compounder Score",
                     }
                 )
@@ -2793,6 +3256,112 @@ with tab_portfolio_builder:
                 file_name="trends_alpha_portfolio_builder.csv",
                 mime="text/csv",
             )
+        st.caption(ADVICE_WARNING)
+
+
+with tab_best_ideas_portfolio:
+    best_portfolio_input = st.text_area(
+        "Best ideas tickers",
+        value="AAPL,MSFT,META,NVDA,GOOGL,AMZN,PLTR,TSLA",
+    )
+    best_portfolio_model = st.selectbox(
+        "Model portfolio",
+        [
+            "Aggressive Growth",
+            "Balanced Growth",
+            "Conservative Compounder",
+        ],
+    )
+    best_portfolio_max = st.number_input(
+        "Maximum tickers to scan",
+        min_value=3,
+        max_value=100,
+        value=20,
+        step=1,
+    )
+    if st.button("Build best ideas portfolio"):
+        best_portfolio_tickers = custom_tickers_from_text(best_portfolio_input)[
+            : int(best_portfolio_max)
+        ]
+        if not best_portfolio_tickers:
+            st.warning("Enter at least one ticker.")
+        else:
+            validation_records = empirical_validation_records(
+                tuple(best_portfolio_tickers),
+                start_date="2016-01-01",
+                price_start="2013-01-01",
+                step_days=252,
+            )
+            screener_frame = score_multiple_tickers(
+                best_portfolio_tickers,
+                validation_records,
+                min_observations=1,
+                sort_by="master_rank_score",
+            )
+            portfolio_frame = best_ideas_portfolio_frame(
+                screener_frame,
+                best_portfolio_model,
+            )
+            summary = best_ideas_portfolio_summary(portfolio_frame)
+            if portfolio_frame.empty:
+                st.warning("No portfolio recommendations were generated.")
+            else:
+                st.subheader("What to Buy Today")
+                st.dataframe(best_ideas_for_today(screener_frame), use_container_width=True)
+
+                st.subheader(best_portfolio_model)
+                metric_cols = st.columns(5)
+                metric_cols[0].metric(
+                    "Expected Portfolio Return",
+                    f"{summary['expected_portfolio_return']:.1f}%",
+                )
+                metric_cols[1].metric(
+                    "Expected Portfolio Win Rate",
+                    f"{summary['expected_portfolio_win_rate']:.1f}%",
+                )
+                metric_cols[2].metric(
+                    "Expected Drawdown",
+                    f"{summary['expected_drawdown']:.1f}%",
+                )
+                metric_cols[3].metric(
+                    "Risk/Reward Ratio",
+                    f"{summary['risk_reward_ratio']:.2f}",
+                )
+                metric_cols[4].metric(
+                    "Portfolio Confidence",
+                    f"{summary['portfolio_confidence']:.1f}%",
+                )
+
+                display = portfolio_frame[
+                    [
+                        "sleeve",
+                        "ticker",
+                        "weight",
+                        "conviction",
+                        "expected_return_range",
+                        "win_rate",
+                        "confidence",
+                        "holding_period",
+                    ]
+                ].rename(
+                    columns={
+                        "sleeve": "Sleeve",
+                        "ticker": "Ticker",
+                        "weight": "Weight",
+                        "conviction": "Conviction",
+                        "expected_return_range": "Expected Return",
+                        "win_rate": "Win Rate",
+                        "confidence": "Confidence",
+                        "holding_period": "Holding Period",
+                    }
+                )
+                st.dataframe(display, use_container_width=True)
+                st.download_button(
+                    "Download Best Ideas Portfolio CSV",
+                    data=portfolio_frame.to_csv(index=False),
+                    file_name="trends_alpha_best_ideas_portfolio.csv",
+                    mime="text/csv",
+                )
         st.caption(ADVICE_WARNING)
 
 
