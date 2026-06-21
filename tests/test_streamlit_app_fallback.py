@@ -3,11 +3,36 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+STREAMLIT_EMPIRICAL_HELPERS = (
+    "current_bucket_return_distribution",
+    "empirical_fallback_message",
+    "empirical_investment_outcome_table",
+    "empirical_outlook_interpretation",
+    "empirical_score_bucket_forecast",
+    "score_bucket_comparison",
+)
+
+
 def load_streamlit_app():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     import streamlit_app
 
     return streamlit_app
+
+
+def test_streamlit_app_imports_successfully():
+    streamlit_app = load_streamlit_app()
+
+    assert streamlit_app.ADVICE_WARNING == "Research tool only. Not financial advice."
+
+
+def test_streamlit_empirical_helpers_import_successfully():
+    from tae import forecasting
+    from tae.forecasting import empirical
+
+    for helper_name in STREAMLIT_EMPIRICAL_HELPERS:
+        assert callable(getattr(empirical, helper_name))
+        assert callable(getattr(forecasting, helper_name))
 
 
 def test_safe_price_history_falls_back_when_yahoo_fails(monkeypatch):
