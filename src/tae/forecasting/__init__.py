@@ -18,6 +18,8 @@ from tae.forecasting.engine import build_forecast_report
 from tae.forecasting.empirical import (
     current_bucket_return_distribution,
     empirical_fallback_message,
+    empirical_investment_outcome_table,
+    empirical_outlook_interpretation,
     empirical_score_bucket_forecast,
     score_bucket_comparison,
 )
@@ -57,6 +59,8 @@ __all__ = [
     "confidence_framework",
     "current_bucket_return_distribution",
     "empirical_fallback_message",
+    "empirical_investment_outcome_table",
+    "empirical_outlook_interpretation",
     "empirical_score_bucket_forecast",
     "final_investment_outcome_card",
     "investment_outcome_projection",

@@ -120,9 +120,13 @@ def test_streamlit_forecast_tab_empirical_core_path_runs_with_fallback_data():
         investment_amount=10,
         min_observations=1,
     )
+    outlook = streamlit_app.empirical_outlook_interpretation(empirical)
+    outcome = streamlit_app.empirical_investment_outcome_table(empirical)
 
     assert quality["fallback_data_used"] is True
     assert report.ticker == "META"
     assert not validation_records.empty
     assert not empirical.empty
     assert "expected_value" in empirical.columns
+    assert outlook["headline"].startswith("Empirical Outlook:")
+    assert not outcome.empty

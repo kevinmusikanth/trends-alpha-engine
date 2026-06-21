@@ -24,6 +24,8 @@ from tae.forecasting.engine import build_forecast_report
 from tae.forecasting.empirical import (
     current_bucket_return_distribution,
     empirical_fallback_message,
+    empirical_investment_outcome_table,
+    empirical_outlook_interpretation,
     empirical_score_bucket_forecast,
     score_bucket_comparison,
 )
@@ -311,6 +313,39 @@ def display_empirical_forecast_section(
         "that scored in the same range, not on today's data alone."
     )
     st.write(empirical_fallback_message(empirical))
+
+    outlook = empirical_outlook_interpretation(empirical)
+    score_bucket = empirical["score_bucket"].iloc[0] if not empirical.empty else "Unknown"
+    st.subheader("Empirical Outlook")
+    outlook_cols = st.columns(4)
+    outlook_cols[0].metric("Current score", f"{score.overall_score:.2f}")
+    outlook_cols[1].metric("Score bucket", score_bucket)
+    outlook_cols[2].metric("Confidence rating", outlook["confidence"])
+    outlook_cols[3].metric(
+        "Observations",
+        int(empirical["observation_count"].max()) if not empirical.empty else 0,
+    )
+    st.success(outlook["headline"])
+    st.write(outlook["explanation"])
+    if outlook["evidence"]:
+        st.write("Historical evidence")
+        st.write(pd.DataFrame({"Evidence": outlook["evidence"]}))
+
+    st.subheader("Empirical Investment Outcome")
+    st.caption(
+        "Expected values use historical average returns from the current score bucket, "
+        "not theoretical forecast percentages."
+    )
+    outcome_display = empirical_investment_outcome_table(empirical)
+    if outcome_display.empty:
+        st.warning("No empirical investment outcomes available for this score bucket.")
+    else:
+        outcome_display = outcome_display.copy()
+        outcome_display["expected_value"] = outcome_display["expected_value"].map(
+            lambda value: format_money(value, currency)
+        )
+        st.dataframe(outcome_display, use_container_width=True)
+
     compare_cols = st.columns(2)
     compare_cols[0].write("Theoretical Forecast")
     compare_cols[0].dataframe(theoretical, use_container_width=True)
