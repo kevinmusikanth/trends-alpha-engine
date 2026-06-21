@@ -118,6 +118,24 @@ def test_screener_row_includes_empirical_metrics():
     empirical = streamlit_app.pd.DataFrame(
         [
             {
+                "horizon": "1 week",
+                "average_return_pct": 1.5,
+                "win_rate_pct": 58.0,
+                "observation_count": 300,
+                "calibration_accuracy_pct": 80.0,
+                "forecast_actual_correlation_pct": 75.0,
+                "forecast_error_pct": 10.0,
+            },
+            {
+                "horizon": "3 months",
+                "average_return_pct": 18.0,
+                "win_rate_pct": 76.0,
+                "observation_count": 300,
+                "calibration_accuracy_pct": 82.0,
+                "forecast_actual_correlation_pct": 76.0,
+                "forecast_error_pct": 9.0,
+            },
+            {
                 "horizon": "12 months",
                 "average_return_pct": 24.0,
                 "win_rate_pct": 72.0,
@@ -169,6 +187,18 @@ def test_screener_row_includes_empirical_metrics():
     assert "opportunity_horizon" in row
     assert "empirical_1w_return" in row
     assert "empirical_6w_return" in row
+    assert row["advisory_score"] > 0
+    assert row["advisory_action"] in {
+        "Short-Term Opportunity",
+        "Medium-Term Opportunity",
+        "Long-Term Compounder",
+        "Watchlist",
+        "Avoid",
+    }
+    assert row["recommended_holding_period"] in streamlit_app.ADVISORY_HORIZONS
+    assert row["historical_win_rate"] > 0
+    assert row["confidence_level"] in {"High", "Good", "Moderate", "Low"}
+    assert "Research indicates AAPL" in row["advisory_summary"]
 
 
 def test_short_term_opportunity_labels_and_horizon_classification():
@@ -218,6 +248,48 @@ def test_empirical_outlook_label_rules():
     assert streamlit_app.empirical_outlook_label(10, 60, 58) == "Neutral"
 
 
+def test_research_advisory_selects_best_risk_adjusted_horizon():
+    streamlit_app = load_streamlit_app()
+    empirical = streamlit_app.pd.DataFrame(
+        [
+            {
+                "horizon": "1 week",
+                "average_return_pct": 2.0,
+                "win_rate_pct": 55.0,
+                "observation_count": 120,
+                "calibration_accuracy_pct": 70.0,
+                "forecast_actual_correlation_pct": 60.0,
+                "forecast_error_pct": 20.0,
+            },
+            {
+                "horizon": "3 months",
+                "average_return_pct": 18.0,
+                "win_rate_pct": 70.0,
+                "observation_count": 120,
+                "calibration_accuracy_pct": 80.0,
+                "forecast_actual_correlation_pct": 70.0,
+                "forecast_error_pct": 10.0,
+            },
+            {
+                "horizon": "5 years",
+                "average_return_pct": 40.0,
+                "win_rate_pct": 52.0,
+                "observation_count": 120,
+                "calibration_accuracy_pct": 55.0,
+                "forecast_actual_correlation_pct": 50.0,
+                "forecast_error_pct": 45.0,
+            },
+        ]
+    )
+
+    advisory = streamlit_app.advisory_row_from_empirical("AMZN", empirical)
+
+    assert advisory["recommended_holding_period"] == "3 months"
+    assert advisory["historical_win_rate"] == 70.0
+    assert advisory["confidence_level"] in {"High", "Good", "Moderate"}
+    assert "medium-term opportunity" in advisory["advisory_summary"]
+
+
 def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
     streamlit_app = load_streamlit_app()
 
@@ -256,6 +328,12 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "ticker",
         "master_rank_score",
         "alpha_consistency_score",
+        "advisory_score",
+        "advisory_action",
+        "recommended_holding_period",
+        "expected_return_range",
+        "historical_win_rate",
+        "confidence_level",
         "overall_score",
         "label",
         "short_term_score",

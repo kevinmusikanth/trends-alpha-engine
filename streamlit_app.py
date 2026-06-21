@@ -72,6 +72,7 @@ YAHOO_WARNING = "Live Yahoo data temporarily unavailable."
 DEFAULT_SCREENER_INVESTMENT = 10000.0
 SCREENER_SORT_OPTIONS = [
     "master_rank_score",
+    "advisory_score",
     "overall_score",
     "short_term_opportunity_score",
     "momentum_explosion_score",
@@ -85,6 +86,17 @@ SCREENER_SORT_OPTIONS = [
     "empirical_win_rate",
     "confidence_pct",
     "best_expected_value",
+]
+ADVISORY_HORIZONS = [
+    "1 week",
+    "2 weeks",
+    "4 weeks",
+    "6 weeks",
+    "3 months",
+    "6 months",
+    "12 months",
+    "3 years",
+    "5 years",
 ]
 
 
@@ -481,6 +493,171 @@ def row_alpha_consistency_score(empirical_forecast: pd.DataFrame) -> float:
     return round((average_win_rate * 0.45) + (stability * 0.30) + (calibration * 0.25), 2)
 
 
+def confidence_level_from_pct(confidence_pct: float) -> str:
+    if confidence_pct >= 80:
+        return "High"
+    if confidence_pct >= 65:
+        return "Good"
+    if confidence_pct >= 50:
+        return "Moderate"
+    return "Low"
+
+
+def expected_return_range(return_pct: float) -> str:
+    spread = max(2.0, abs(return_pct) * 0.15)
+    low = return_pct - spread
+    high = return_pct + spread
+    return f"{low:.1f}% to {high:.1f}%"
+
+
+def advisory_horizon_group(horizon: str) -> str:
+    if horizon in {"1 week", "2 weeks", "4 weeks", "6 weeks"}:
+        return "short-term"
+    if horizon in {"3 months", "6 months"}:
+        return "medium-term"
+    return "long-term"
+
+
+def advisory_horizon_years(horizon: str) -> float:
+    return {
+        "1 week": 5 / 252,
+        "2 weeks": 10 / 252,
+        "4 weeks": 20 / 252,
+        "6 weeks": 30 / 252,
+        "3 months": 0.25,
+        "6 months": 0.50,
+        "12 months": 1.0,
+        "3 years": 3.0,
+        "5 years": 5.0,
+    }.get(horizon, 1.0)
+
+
+def time_adjusted_empirical_return_pct(return_pct: float, horizon: str) -> float:
+    years = advisory_horizon_years(horizon)
+    if years <= 0:
+        return return_pct
+    time_adjustment = min(4.0, (1 / years) ** 0.5)
+    return return_pct * time_adjustment
+
+
+def advisory_action(advisory_score: float, horizon: str) -> str:
+    group = advisory_horizon_group(horizon)
+    if advisory_score >= 80 and group == "short-term":
+        return "Short-Term Opportunity"
+    if advisory_score >= 75 and group == "medium-term":
+        return "Medium-Term Opportunity"
+    if advisory_score >= 70 and group == "long-term":
+        return "Long-Term Compounder"
+    if advisory_score >= 60:
+        return "Watchlist"
+    return "Avoid"
+
+
+def advisory_summary(ticker: str, action: str, horizon: str, return_range: str) -> str:
+    group = advisory_horizon_group(horizon)
+    if group == "short-term":
+        return (
+            f"Research indicates {ticker} has the strongest short-term opportunity "
+            f"with an expected return of {return_range} over 1-6 weeks."
+        )
+    if group == "medium-term":
+        return (
+            f"Research indicates {ticker} has the strongest medium-term opportunity "
+            f"with an expected return of {return_range} over 3-6 months."
+        )
+    return (
+        f"Research indicates {ticker} is primarily a long-term compounding opportunity "
+        f"with an expected return of {return_range} over 1-5 years."
+    )
+
+
+def advisory_row_from_empirical(
+    ticker: str,
+    empirical_forecast: pd.DataFrame,
+    min_observations: int = 1,
+) -> dict[str, object]:
+    if empirical_forecast.empty:
+        return empty_advisory_row(ticker)
+
+    candidates = []
+    for horizon in ADVISORY_HORIZONS:
+        row = empirical_forecast[empirical_forecast["horizon"] == horizon]
+        if row.empty:
+            continue
+        item = row.iloc[0]
+        observations = int(item.get("observation_count", 0))
+        average_return = float(item.get("average_return_pct", 0.0))
+        win_rate_pct = float(item.get("win_rate_pct", 0.0))
+        calibration_pct = float(item.get("calibration_accuracy_pct", 0.0))
+        error_pct = float(item.get("forecast_error_pct", 100.0))
+        correlation_pct = float(item.get("forecast_actual_correlation_pct", 50.0))
+        observation_score = min(100.0, observations / max(1, min_observations * 10) * 100)
+        confidence_pct = (
+            observation_score * 0.25
+            + calibration_pct * 0.25
+            + correlation_pct * 0.20
+            + max(0.0, 100 - error_pct) * 0.15
+            + win_rate_pct * 0.15
+        )
+        confidence_pct = max(0.0, min(100.0, confidence_pct))
+        if observations < min_observations:
+            confidence_pct *= 0.50
+        annualized_return_pct = time_adjusted_empirical_return_pct(average_return, horizon)
+        risk_adjusted_return = (
+            annualized_return_pct * (win_rate_pct / 100) * (confidence_pct / 100)
+        )
+        advisory_score = max(
+            0.0,
+            min(
+                100.0,
+                (max(0.0, risk_adjusted_return) * 2.0)
+                + (win_rate_pct * 0.25)
+                + (confidence_pct * 0.35),
+            ),
+        )
+        candidates.append(
+            {
+                "horizon": horizon,
+                "average_return_pct": average_return,
+                "win_rate_pct": win_rate_pct,
+                "confidence_pct": confidence_pct,
+                "advisory_score": round(advisory_score, 2),
+                "risk_adjusted_return": risk_adjusted_return,
+            }
+        )
+
+    if not candidates:
+        return empty_advisory_row(ticker)
+
+    best = max(candidates, key=lambda value: value["risk_adjusted_return"])
+    action = advisory_action(best["advisory_score"], best["horizon"])
+    return_range = expected_return_range(best["average_return_pct"])
+    return {
+        "advisory_score": best["advisory_score"],
+        "advisory_action": action,
+        "recommended_holding_period": best["horizon"],
+        "expected_return_range": return_range,
+        "historical_win_rate": round(best["win_rate_pct"], 2),
+        "confidence_level": confidence_level_from_pct(best["confidence_pct"]),
+        "advisory_summary": advisory_summary(ticker, action, best["horizon"], return_range),
+    }
+
+
+def empty_advisory_row(ticker: str) -> dict[str, object]:
+    return {
+        "advisory_score": 0.0,
+        "advisory_action": "Avoid",
+        "recommended_holding_period": "Insufficient evidence",
+        "expected_return_range": "0.0% to 0.0%",
+        "historical_win_rate": 0.0,
+        "confidence_level": "Low",
+        "advisory_summary": (
+            f"Research indicates {ticker} does not yet have enough empirical evidence "
+            "for a high-confidence advisory view."
+        ),
+    }
+
+
 def expected_value_from_return(
     return_pct: float,
     investment_amount: float = DEFAULT_SCREENER_INVESTMENT,
@@ -599,6 +776,7 @@ def screener_row_from_score(score, empirical_forecast: pd.DataFrame, prices: pd.
     expected_value_5y = expected_value_from_return(empirical_5y_return)
     confidence_pct = empirical_confidence_pct(empirical_forecast)
     alpha_consistency = row_alpha_consistency_score(empirical_forecast)
+    advisory = advisory_row_from_empirical(score.ticker, empirical_forecast)
     master_score = master_rank_score(
         score.overall_score,
         opportunity_score,
@@ -610,6 +788,7 @@ def screener_row_from_score(score, empirical_forecast: pd.DataFrame, prices: pd.
         "ticker": score.ticker,
         "master_rank_score": master_score,
         "alpha_consistency_score": alpha_consistency,
+        **advisory,
         "overall_score": score.overall_score,
         "label": score.recommendation,
         "short_term_score": score.short_score,
@@ -954,6 +1133,7 @@ def display_empirical_forecast_section(
     tab_quality_edge,
     tab_universe,
     tab_opportunity_finder,
+    tab_advisory,
     tab_backtest,
     tab_watchlist,
     tab_portfolio_builder,
@@ -969,6 +1149,7 @@ def display_empirical_forecast_section(
         "Quality of Edge",
         "Universe Backtest",
         "Opportunity Finder",
+        "Advisory",
         "Backtesting",
         "Watchlist",
         "Portfolio Builder",
@@ -2094,6 +2275,80 @@ with tab_opportunity_finder:
                     "Download Opportunities CSV",
                     data=opportunity_frame.to_csv(index=False),
                     file_name="trends_alpha_opportunities.csv",
+                    mime="text/csv",
+                )
+        st.caption(ADVICE_WARNING)
+
+
+with tab_advisory:
+    advisory_tickers_text = st.text_area(
+        "Advisory tickers",
+        value="AAPL,MSFT,META,NVDA,GOOGL,AMZN,PLTR,TSLA",
+    )
+    advisory_max = st.number_input(
+        "Advisory maximum tickers",
+        min_value=1,
+        max_value=100,
+        value=20,
+        step=1,
+    )
+    advisory_min_observations = st.number_input(
+        "Minimum advisory observations",
+        min_value=1,
+        max_value=500,
+        value=10,
+        step=1,
+    )
+    if st.button("Run research advisory"):
+        advisory_tickers = custom_tickers_from_text(advisory_tickers_text)[: int(advisory_max)]
+        if not advisory_tickers:
+            st.warning("Add at least one ticker.")
+        else:
+            validation_records = empirical_validation_records(
+                tuple(advisory_tickers),
+                start_date="2016-01-01",
+                price_start="2013-01-01",
+                step_days=252,
+            )
+            advisory_frame = score_multiple_tickers(
+                advisory_tickers,
+                validation_records,
+                min_observations=int(advisory_min_observations),
+                sort_by="advisory_score",
+            ).head(10)
+            if advisory_frame.empty:
+                st.warning("No advisory results were generated.")
+            else:
+                st.subheader("Research Advisory")
+                display = advisory_frame[
+                    [
+                        "ticker",
+                        "advisory_action",
+                        "recommended_holding_period",
+                        "expected_return_range",
+                        "historical_win_rate",
+                        "confidence_level",
+                        "advisory_score",
+                    ]
+                ].rename(
+                    columns={
+                        "ticker": "Ticker",
+                        "advisory_action": "Recommended Action",
+                        "recommended_holding_period": "Holding Period",
+                        "expected_return_range": "Expected Return",
+                        "historical_win_rate": "Historical Win Rate",
+                        "confidence_level": "Confidence",
+                        "advisory_score": "Advisory Score",
+                    }
+                )
+                st.dataframe(display, use_container_width=True)
+                st.subheader("Top 10 Opportunities")
+                for summary in advisory_frame["advisory_summary"].head(10):
+                    st.write(summary)
+                st.download_button(
+                    "Download Advisory CSV",
+                    data=advisory_frame.to_csv(index=False),
+                    file_name="trends_alpha_research_advisory.csv",
                     mime="text/csv",
                 )
         st.caption(ADVICE_WARNING)
