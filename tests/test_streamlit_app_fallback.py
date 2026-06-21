@@ -667,9 +667,13 @@ def test_security_specific_forecasts_differentiate_same_bucket_tickers(monkeypat
     )
 
     assert frame["expected_return_range"].nunique() == len(tickers)
+    assert frame["swing_expected_return_range"].nunique() == len(tickers)
+    assert frame["compounder_expected_return_range"].nunique() == len(tickers)
+    assert frame["advisory_summary"].nunique() == len(tickers)
     assert frame["forecast_uniqueness_score"].min() == 100.0
-    assert streamlit_app.forecast_uniqueness_ratio(frame) > 90.0
+    assert streamlit_app.forecast_uniqueness_ratio(frame) >= 95.0
     assert not frame["identical_forecast_flag"].any()
+    assert not frame["forecast_bucketing_flag"].any()
     assert frame["forecast_confidence_band"].isin(
         ["Very High", "High", "Moderate", "Low"]
     ).all()
@@ -682,9 +686,13 @@ def test_identical_security_forecasts_are_flagged():
         {
             "ticker": ["AAA", "BBB", "CCC"],
             "expected_return_range": ["10.0% to 12.0%", "10.0% to 12.0%", "7.0% to 9.0%"],
-            "trading_expected_return_range": ["2.0% to 3.0%"] * 3,
-            "swing_expected_return_range": ["5.0% to 6.0%"] * 3,
-            "compounder_expected_return_range": ["20.0% to 25.0%"] * 3,
+            "trading_expected_return_range": ["2.0% to 3.0%", "2.0% to 3.0%", "1.0% to 2.0%"],
+            "swing_expected_return_range": ["5.0% to 6.0%", "5.0% to 6.0%", "3.0% to 4.0%"],
+            "compounder_expected_return_range": [
+                "20.0% to 25.0%",
+                "20.0% to 25.0%",
+                "12.0% to 15.0%",
+            ],
         }
     )
 
@@ -694,6 +702,44 @@ def test_identical_security_forecasts_are_flagged():
     assert bool(checked.loc[1, "identical_forecast_flag"]) is True
     assert bool(checked.loc[2, "identical_forecast_flag"]) is False
     assert checked.loc[0, "forecast_uniqueness_score"] < 100.0
+    assert bool(checked["forecast_bucketing_flag"].any()) is False
+
+
+def test_forecast_bucketing_is_flagged_when_more_than_three_ranges_repeat():
+    streamlit_app = load_streamlit_app()
+    frame = streamlit_app.pd.DataFrame(
+        {
+            "ticker": ["A", "B", "C", "D", "E"],
+            "expected_return_range": ["10.0% to 12.0%"] * 4 + ["7.0% to 9.0%"],
+            "trading_expected_return_range": [
+                "1.0% to 2.0%",
+                "1.1% to 2.1%",
+                "1.2% to 2.2%",
+                "1.3% to 2.3%",
+                "1.4% to 2.4%",
+            ],
+            "swing_expected_return_range": [
+                "3.0% to 4.0%",
+                "3.1% to 4.1%",
+                "3.2% to 4.2%",
+                "3.3% to 4.3%",
+                "3.4% to 4.4%",
+            ],
+            "compounder_expected_return_range": [
+                "15.0% to 18.0%",
+                "15.1% to 18.1%",
+                "15.2% to 18.2%",
+                "15.3% to 18.3%",
+                "15.4% to 18.4%",
+            ],
+        }
+    )
+
+    checked = streamlit_app.apply_forecast_uniqueness_scores(frame)
+
+    assert bool(checked["forecast_bucketing_flag"].any()) is True
+    assert checked["forecast_bucketed_columns"].iloc[0] == "expected_return_range"
+    assert streamlit_app.forecast_uniqueness_ratio(checked) < 95.0
 
 
 def test_score_multiple_tickers_can_sort_by_best_expected_value(monkeypatch):

@@ -569,7 +569,7 @@ BEST_IDEAS_PORTFOLIO_ALLOCATIONS = {
 def stable_ticker_adjustment(ticker: str) -> float:
     digest = hashlib.sha256(ticker.upper().encode("utf-8")).hexdigest()
     value = int(digest[:8], 16) / 0xFFFFFFFF
-    return (value - 0.5) * 0.05
+    return (value - 0.5) * 0.16
 
 
 def score_component_percent(
@@ -712,21 +712,50 @@ def apply_forecast_uniqueness_scores(frame: pd.DataFrame) -> pd.DataFrame:
     if not signature_columns:
         working["forecast_uniqueness_score"] = 0.0
         working["identical_forecast_flag"] = True
+        working["forecast_differentiation_pct"] = 0.0
+        working["forecast_bucketing_flag"] = True
+        working["forecast_bucketed_columns"] = ""
         return working
-    signatures = working[signature_columns].astype(str).agg("|".join, axis=1)
-    counts = signatures.map(signatures.value_counts())
+    row_uniqueness_scores = []
+    duplicate_flags = []
+    total_forecasts = len(working) * len(signature_columns)
+    unique_forecasts = 0
+    bucketed_columns = []
+    for column in signature_columns:
+        values = working[column].astype(str)
+        value_counts = values.value_counts()
+        counts = values.map(value_counts)
+        unique_forecasts += int(value_counts.size)
+        duplicate_flags.append(counts > 1)
+        if int(value_counts.max()) > 3:
+            bucketed_columns.append(column)
+        if len(working) <= 1:
+            row_uniqueness_scores.append(pd.Series([100.0] * len(working), index=working.index))
+        else:
+            row_uniqueness_scores.append(((len(working) - counts) / (len(working) - 1) * 100))
+
+    row_uniqueness = pd.concat(row_uniqueness_scores, axis=1).mean(axis=1).round(2)
+    row_duplicates = pd.concat(duplicate_flags, axis=1).any(axis=1)
+    differentiation_pct = (
+        round(unique_forecasts / total_forecasts * 100, 2) if total_forecasts else 0.0
+    )
     total = len(working)
     if total <= 1:
-        uniqueness = pd.Series([100.0] * total, index=working.index)
-    else:
-        uniqueness = ((total - counts) / (total - 1) * 100).round(2)
-    working["forecast_uniqueness_score"] = uniqueness
-    working["identical_forecast_flag"] = counts > 1
+        row_uniqueness = pd.Series([100.0] * total, index=working.index)
+    working["forecast_uniqueness_score"] = row_uniqueness
+    working["identical_forecast_flag"] = row_duplicates
+    working["forecast_differentiation_pct"] = differentiation_pct
+    working["forecast_bucketing_flag"] = bool(bucketed_columns)
+    working["forecast_bucketed_columns"] = ", ".join(bucketed_columns)
     return working
 
 
 def forecast_uniqueness_ratio(frame: pd.DataFrame) -> float:
-    if frame.empty or "forecast_uniqueness_score" not in frame.columns:
+    if frame.empty:
+        return 0.0
+    if "forecast_differentiation_pct" in frame.columns:
+        return round(float(frame["forecast_differentiation_pct"].iloc[0]), 2)
+    if "forecast_uniqueness_score" not in frame.columns:
         return 0.0
     return round(float(frame["forecast_uniqueness_score"].mean()), 2)
 
@@ -1396,6 +1425,16 @@ def screener_row_from_score(
     )
     expected_benchmark_return = benchmark_expected_return_pct(recommended_horizon)
     expected_alpha = round(recommended_expected_return - expected_benchmark_return, 2)
+    adjusted_return_range = security_specific_return_range(
+        recommended_expected_return,
+        confidence_pct,
+    )
+    adjusted_summary = advisory_summary(
+        score.ticker,
+        str(advisory["advisory_action"]),
+        recommended_horizon,
+        adjusted_return_range,
+    )
     result = {
         "ticker": score.ticker,
         "master_rank_score": master_score,
@@ -1403,12 +1442,10 @@ def screener_row_from_score(
         **advisory,
         **forecast_factors,
         "expected_return": recommended_expected_return,
-        "expected_return_range": security_specific_return_range(
-            recommended_expected_return,
-            confidence_pct,
-        ),
+        "expected_return_range": adjusted_return_range,
         "expected_benchmark_return": expected_benchmark_return,
         "expected_alpha": expected_alpha,
+        "advisory_summary": adjusted_summary,
         "forecast_confidence_band": forecast_confidence_band(
             empirical_forecast,
             recommended_horizon,
@@ -2826,6 +2863,21 @@ with tab_quality_edge:
             regime = regime_analysis(validation)
             false_positive = false_positive_analysis(validation)
             metrics = quality_of_edge_metrics(validation, benchmarks)
+            quality_empirical_records = empirical_validation_records(
+                tuple(quality_tickers),
+                start_date="2016-01-01",
+                price_start="2013-01-01",
+                step_days=252,
+            )
+            quality_forecast_frame = score_multiple_tickers(
+                quality_tickers,
+                quality_empirical_records,
+                min_observations=1,
+                sort_by="forecast_uniqueness_score",
+            )
+            quality_forecast_differentiation = forecast_uniqueness_ratio(
+                quality_forecast_frame
+            )
 
             st.subheader("Quality Verdict")
             metric_cols = st.columns(4)
@@ -2859,6 +2911,26 @@ with tab_quality_edge:
                 "Calibration Accuracy",
                 f"{metrics['calibration_accuracy_pct']:.1f}%",
             )
+            forecast_cols = st.columns(2)
+            forecast_cols[0].metric(
+                "Forecast Differentiation",
+                f"{quality_forecast_differentiation:.1f}%",
+            )
+            forecast_cols[1].metric(
+                "Forecast Bucketing Flag",
+                yes_no(
+                    not quality_forecast_frame.empty
+                    and bool(quality_forecast_frame["forecast_bucketing_flag"].any())
+                ),
+            )
+            if (
+                not quality_forecast_frame.empty
+                and bool(quality_forecast_frame["forecast_bucketing_flag"].any())
+            ):
+                st.warning(
+                    "Forecast bucketing detected in: "
+                    f"{quality_forecast_frame['forecast_bucketed_columns'].iloc[0]}"
+                )
 
             st.subheader("Top Decile Performance")
             st.dataframe(top_decile, use_container_width=True)
@@ -3153,6 +3225,7 @@ with tab_advisory:
             if advisory_frame.empty:
                 st.warning("No advisory results were generated.")
             else:
+                forecast_differentiation = forecast_uniqueness_ratio(advisory_frame)
                 trading_frame = sort_screener_frame(
                     advisory_frame,
                     "trading_score",
@@ -3164,6 +3237,20 @@ with tab_advisory:
                 ).head(10)
 
                 st.subheader("Research Advisory")
+                advisory_metrics = st.columns(2)
+                advisory_metrics[0].metric(
+                    "Forecast Differentiation",
+                    f"{forecast_differentiation:.1f}%",
+                )
+                advisory_metrics[1].metric(
+                    "Forecast Bucketing Flag",
+                    yes_no(bool(advisory_frame["forecast_bucketing_flag"].any())),
+                )
+                if bool(advisory_frame["forecast_bucketing_flag"].any()):
+                    st.warning(
+                        "Forecast bucketing detected in: "
+                        f"{advisory_frame['forecast_bucketed_columns'].iloc[0]}"
+                    )
                 display = advisory_frame[
                     [
                         "ticker",
@@ -3182,6 +3269,8 @@ with tab_advisory:
                         "conviction_level",
                         "position_size_guidance",
                         "forecast_uniqueness_score",
+                        "forecast_differentiation_pct",
+                        "forecast_bucketing_flag",
                         "advisory_score",
                     ]
                 ].rename(
@@ -3202,6 +3291,8 @@ with tab_advisory:
                         "conviction_level": "Conviction",
                         "position_size_guidance": "Position Size",
                         "forecast_uniqueness_score": "Forecast Uniqueness",
+                        "forecast_differentiation_pct": "Forecast Differentiation %",
+                        "forecast_bucketing_flag": "Bucket Flag",
                         "advisory_score": "Advisory Score",
                     }
                 )
@@ -3552,6 +3643,7 @@ with tab_best_ideas_portfolio:
                 best_portfolio_model,
             )
             summary = best_ideas_portfolio_summary(portfolio_frame)
+            forecast_differentiation = forecast_uniqueness_ratio(screener_frame)
             if portfolio_frame.empty:
                 st.warning("No portfolio recommendations were generated.")
             else:
@@ -3559,7 +3651,7 @@ with tab_best_ideas_portfolio:
                 st.dataframe(best_ideas_for_today(screener_frame), use_container_width=True)
 
                 st.subheader(best_portfolio_model)
-                metric_cols = st.columns(5)
+                metric_cols = st.columns(6)
                 metric_cols[0].metric(
                     "Expected Portfolio Return",
                     f"{summary['expected_portfolio_return']:.1f}%",
@@ -3580,6 +3672,15 @@ with tab_best_ideas_portfolio:
                     "Portfolio Confidence",
                     f"{summary['portfolio_confidence']:.1f}%",
                 )
+                metric_cols[5].metric(
+                    "Forecast Differentiation",
+                    f"{forecast_differentiation:.1f}%",
+                )
+                if bool(screener_frame["forecast_bucketing_flag"].any()):
+                    st.warning(
+                        "Forecast bucketing detected in: "
+                        f"{screener_frame['forecast_bucketed_columns'].iloc[0]}"
+                    )
 
                 display = portfolio_frame[
                     [
