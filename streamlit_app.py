@@ -29,6 +29,15 @@ from tae.forecasting.empirical import (
     empirical_score_bucket_forecast,
     score_bucket_comparison,
 )
+from tae.forecasting.institutional import (
+    alpha_consistency_label,
+    false_positive_analysis,
+    master_rank_score,
+    quality_of_edge_metrics,
+    regime_analysis,
+    top_20_portfolio_test,
+    top_decile_test,
+)
 from tae.forecasting.outcomes import investment_outcome_projection, outcome_growth_paths
 from tae.forecasting.point_in_time import (
     forecast_calibration as pit_forecast_calibration,
@@ -62,10 +71,17 @@ st.caption(ADVICE_WARNING)
 YAHOO_WARNING = "Live Yahoo data temporarily unavailable."
 DEFAULT_SCREENER_INVESTMENT = 10000.0
 SCREENER_SORT_OPTIONS = [
+    "master_rank_score",
     "overall_score",
+    "short_term_opportunity_score",
+    "momentum_explosion_score",
     "empirical_12m_return",
     "empirical_3y_return",
     "empirical_5y_return",
+    "empirical_1w_return",
+    "empirical_2w_return",
+    "empirical_4w_return",
+    "empirical_6w_return",
     "empirical_win_rate",
     "confidence_pct",
     "best_expected_value",
@@ -274,6 +290,148 @@ def empirical_metric_for_horizon(
     return float(row.iloc[0][column])
 
 
+def score_range(value: float, low: float, high: float) -> float:
+    if high == low:
+        return 0.0
+    return round(max(0.0, min(100.0, ((value - low) / (high - low)) * 100)), 2)
+
+
+def price_return(prices: pd.DataFrame, days: int) -> float:
+    if prices.empty or "close" not in prices or len(prices) <= days:
+        return 0.0
+    close = prices.sort_values("date")["close"].astype(float)
+    start = float(close.iloc[-days - 1])
+    if start == 0:
+        return 0.0
+    return float(close.iloc[-1] / start - 1)
+
+
+def volume_acceleration_ratio(prices: pd.DataFrame) -> float:
+    if prices.empty or "volume" not in prices or len(prices) < 25:
+        return 1.0
+    volume = prices.sort_values("date")["volume"].astype(float)
+    recent = float(volume.tail(5).mean())
+    base = float(volume.iloc[-25:-5].mean())
+    if base == 0:
+        return 1.0
+    return recent / base
+
+
+def atr_acceleration_ratio(prices: pd.DataFrame) -> float:
+    required = {"high", "low", "close"}
+    if prices.empty or required - set(prices.columns) or len(prices) < 60:
+        return 1.0
+    ordered = prices.sort_values("date").copy()
+    high = ordered["high"].astype(float)
+    low = ordered["low"].astype(float)
+    close = ordered["close"].astype(float)
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    recent_atr = float(true_range.tail(10).mean())
+    base_atr = float(true_range.iloc[-60:-10].mean())
+    if base_atr == 0:
+        return 1.0
+    return recent_atr / base_atr
+
+
+def momentum_explosion_details(prices: pd.DataFrame) -> dict[str, float | str]:
+    if prices.empty or "close" not in prices:
+        return {
+            "momentum_explosion_score": 0.0,
+            "momentum_explosion_label": "Avoid",
+            "relative_strength_score": 0.0,
+            "volume_acceleration_score": 0.0,
+        }
+
+    ordered = prices.sort_values("date").copy()
+    close = ordered["close"].astype(float)
+    five_day_return = price_return(ordered, 5)
+    twenty_day_return = price_return(ordered, 20)
+    relative_strength = twenty_day_return - 0.02
+    volume_ratio = volume_acceleration_ratio(ordered)
+    high_52w = float(close.tail(252).max()) if not close.empty else 0.0
+    distance_from_high = (float(close.iloc[-1]) / high_52w - 1) if high_52w else -1.0
+    atr_ratio = atr_acceleration_ratio(ordered)
+
+    five_day_score = score_range(five_day_return, -0.05, 0.10)
+    twenty_day_score = score_range(twenty_day_return, -0.10, 0.20)
+    relative_strength_score = score_range(relative_strength, -0.05, 0.15)
+    volume_score = score_range(volume_ratio, 0.80, 2.00)
+    high_score = score_range(distance_from_high, -0.30, 0.0)
+    volatility_score = score_range(atr_ratio, 0.80, 1.60)
+    score = round(
+        five_day_score * 0.15
+        + twenty_day_score * 0.20
+        + relative_strength_score * 0.20
+        + volume_score * 0.15
+        + high_score * 0.15
+        + volatility_score * 0.15,
+        2,
+    )
+    return {
+        "momentum_explosion_score": score,
+        "momentum_explosion_label": momentum_explosion_label(score),
+        "relative_strength_score": relative_strength_score,
+        "volume_acceleration_score": volume_score,
+    }
+
+
+def momentum_explosion_label(score: float) -> str:
+    if score >= 80:
+        return "High Probability Runner"
+    if score >= 60:
+        return "Positive Momentum"
+    if score >= 40:
+        return "Neutral"
+    if score >= 20:
+        return "Weak"
+    return "Avoid"
+
+
+def short_term_opportunity_label(score: float) -> str:
+    if score >= 85:
+        return "Swing Buy Now"
+    if score >= 70:
+        return "Strong Momentum"
+    if score >= 55:
+        return "Watch"
+    return "Ignore"
+
+
+def opportunity_horizon_label(momentum_score: float, long_term_score: float) -> str:
+    strong_momentum = momentum_score >= 70
+    strong_long_term = long_term_score >= 70
+    if strong_long_term and not strong_momentum:
+        return "Long-Term Investment"
+    if strong_momentum and not strong_long_term:
+        return "Swing Trade"
+    if strong_momentum and strong_long_term:
+        return "Buy and Hold"
+    return "Avoid"
+
+
+def short_term_opportunity_score(
+    score,
+    momentum_details: dict[str, float | str],
+    empirical_1m_win_rate: float,
+) -> float:
+    opportunity_score = (
+        float(momentum_details["momentum_explosion_score"]) * 0.40
+        + score.short_score * 0.25
+        + float(momentum_details["relative_strength_score"]) * 0.15
+        + float(momentum_details["volume_acceleration_score"]) * 0.10
+        + empirical_1m_win_rate * 0.10
+    )
+    return round(max(0.0, min(100.0, opportunity_score)), 2)
+
+
 def empirical_confidence_pct(empirical_forecast: pd.DataFrame) -> float:
     if empirical_forecast.empty:
         return 0.0
@@ -292,13 +450,35 @@ def empirical_confidence_pct(empirical_forecast: pd.DataFrame) -> float:
     )
     error_pct = float(selected.get("forecast_error_pct", pd.Series([50.0])).astype(float).mean())
     error_score = max(0.0, 100 - error_pct)
+    win_rates = selected.get("win_rate_pct", pd.Series([50.0])).astype(float)
+    win_rate_score = float(win_rates.mean())
+    stability_score = max(0.0, 100 - float(win_rates.std() or 0.0))
+    win_rate_stability_score = (win_rate_score * 0.60) + (stability_score * 0.40)
     confidence = (
-        observation_score * 0.30
-        + calibration_score * 0.30
-        + correlation_score * 0.25
+        observation_score * 0.25
+        + calibration_score * 0.25
+        + correlation_score * 0.20
         + error_score * 0.15
+        + win_rate_stability_score * 0.15
     )
     return round(max(0.0, min(100.0, confidence)), 2)
+
+
+def row_alpha_consistency_score(empirical_forecast: pd.DataFrame) -> float:
+    if empirical_forecast.empty:
+        return 0.0
+    selected = empirical_forecast[
+        empirical_forecast["horizon"].isin(["1 month", "3 months", "12 months"])
+    ]
+    if selected.empty:
+        selected = empirical_forecast
+    win_rates = selected["win_rate_pct"].astype(float)
+    average_win_rate = float(win_rates.mean())
+    stability = max(0.0, 100 - float(win_rates.std() or 0.0))
+    calibration = float(
+        selected.get("calibration_accuracy_pct", pd.Series([50.0])).astype(float).mean()
+    )
+    return round((average_win_rate * 0.45) + (stability * 0.30) + (calibration * 0.25), 2)
 
 
 def expected_value_from_return(
@@ -337,7 +517,58 @@ def empirical_outlook_label(
     return "Neutral"
 
 
-def screener_row_from_score(score, empirical_forecast: pd.DataFrame) -> dict[str, object]:
+def screener_row_from_score(score, empirical_forecast: pd.DataFrame, prices: pd.DataFrame) -> dict[str, object]:
+    momentum_details = momentum_explosion_details(prices)
+    empirical_1w_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "1 week",
+        "average_return_pct",
+    )
+    empirical_2w_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "2 weeks",
+        "average_return_pct",
+    )
+    empirical_4w_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "4 weeks",
+        "average_return_pct",
+    )
+    empirical_6w_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "6 weeks",
+        "average_return_pct",
+    )
+    empirical_1w_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "1 week",
+        "win_rate_pct",
+    )
+    empirical_2w_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "2 weeks",
+        "win_rate_pct",
+    )
+    empirical_4w_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "4 weeks",
+        "win_rate_pct",
+    )
+    empirical_6w_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "6 weeks",
+        "win_rate_pct",
+    )
+    empirical_1m_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "1 month",
+        "average_return_pct",
+    )
+    empirical_1m_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "1 month",
+        "win_rate_pct",
+    )
     empirical_12m_return = empirical_metric_for_horizon(
         empirical_forecast,
         "12 months",
@@ -358,22 +589,56 @@ def screener_row_from_score(score, empirical_forecast: pd.DataFrame) -> dict[str
         "12 months",
         "win_rate_pct",
     )
+    opportunity_score = short_term_opportunity_score(
+        score,
+        momentum_details,
+        empirical_1m_win_rate,
+    )
     expected_value_12m = expected_value_from_return(empirical_12m_return)
     expected_value_3y = expected_value_from_return(empirical_3y_return)
     expected_value_5y = expected_value_from_return(empirical_5y_return)
+    confidence_pct = empirical_confidence_pct(empirical_forecast)
+    alpha_consistency = row_alpha_consistency_score(empirical_forecast)
+    master_score = master_rank_score(
+        score.overall_score,
+        opportunity_score,
+        confidence_pct,
+        empirical_12m_return,
+        empirical_5y_return,
+    )
     return {
         "ticker": score.ticker,
+        "master_rank_score": master_score,
+        "alpha_consistency_score": alpha_consistency,
         "overall_score": score.overall_score,
         "label": score.recommendation,
         "short_term_score": score.short_score,
         "medium_term_score": score.medium_score,
         "long_term_score": score.long_score,
         "risk_score": score.risk_score,
+        "momentum_explosion_score": momentum_details["momentum_explosion_score"],
+        "momentum_explosion_label": momentum_details["momentum_explosion_label"],
+        "short_term_opportunity_score": opportunity_score,
+        "short_term_opportunity_label": short_term_opportunity_label(opportunity_score),
+        "opportunity_horizon": opportunity_horizon_label(
+            float(momentum_details["momentum_explosion_score"]),
+            score.long_score,
+        ),
+        "empirical_1w_return": empirical_1w_return,
+        "empirical_2w_return": empirical_2w_return,
+        "empirical_4w_return": empirical_4w_return,
+        "empirical_6w_return": empirical_6w_return,
+        "empirical_1w_win_rate": empirical_1w_win_rate,
+        "empirical_2w_win_rate": empirical_2w_win_rate,
+        "empirical_4w_win_rate": empirical_4w_win_rate,
+        "empirical_6w_win_rate": empirical_6w_win_rate,
+        "empirical_1m_return": empirical_1m_return,
+        "empirical_1m_win_rate": empirical_1m_win_rate,
         "empirical_12m_return": empirical_12m_return,
         "empirical_3y_return": empirical_3y_return,
         "empirical_5y_return": empirical_5y_return,
         "empirical_win_rate": empirical_win_rate,
-        "confidence_pct": empirical_confidence_pct(empirical_forecast),
+        "confidence_pct": confidence_pct,
         "best_holding_period": best_holding_period_from_returns(
             empirical_12m_return,
             empirical_3y_return,
@@ -417,7 +682,7 @@ def score_multiple_tickers(
             validation_records,
             min_observations=min_observations,
         )
-        rows.append(screener_row_from_score(score, empirical))
+        rows.append(screener_row_from_score(score, empirical, prices))
     if not rows:
         return pd.DataFrame()
     return sort_screener_frame(pd.DataFrame(rows), sort_by)
@@ -436,13 +701,51 @@ def best_opportunity_ticker(frame: pd.DataFrame) -> str:
     return str(working.sort_values("opportunity_score", ascending=False).iloc[0]["ticker"])
 
 
-def portfolio_builder_frame(screener_frame: pd.DataFrame) -> pd.DataFrame:
+def opportunity_finder_results(
+    screener_frame: pd.DataFrame,
+    minimum_score: float,
+    minimum_confidence: float,
+    limit: int = 20,
+) -> pd.DataFrame:
+    if screener_frame.empty:
+        return screener_frame
+    filtered = screener_frame[
+        (screener_frame["short_term_opportunity_score"] >= minimum_score)
+        & (screener_frame["confidence_pct"] >= minimum_confidence)
+    ]
+    return sort_screener_frame(filtered, "master_rank_score").head(limit)
+
+
+def portfolio_weights(screener_frame: pd.DataFrame, mode: str) -> pd.Series:
+    if screener_frame.empty:
+        return pd.Series(dtype=float)
+    if mode == "Short-Term Opportunity Portfolio":
+        raw_weights = screener_frame["short_term_opportunity_score"].astype(float)
+    elif mode == "Balanced Portfolio":
+        raw_weights = (
+            screener_frame["overall_score"].astype(float) * 0.50
+            + screener_frame["short_term_opportunity_score"].astype(float) * 0.50
+        )
+    else:
+        raw_weights = screener_frame["overall_score"].astype(float)
+    total = float(raw_weights.sum())
+    if total <= 0:
+        return pd.Series([0.0] * len(screener_frame), index=screener_frame.index)
+    return raw_weights / total
+
+
+def portfolio_builder_frame(
+    screener_frame: pd.DataFrame,
+    mode: str = "Long-Term Portfolio",
+) -> pd.DataFrame:
     if screener_frame.empty:
         return pd.DataFrame()
     portfolio = screener_frame[
         [
             "ticker",
             "overall_score",
+            "short_term_opportunity_score",
+            "opportunity_horizon",
             "empirical_outlook",
             "expected_value_5y",
             "empirical_12m_return",
@@ -450,31 +753,37 @@ def portfolio_builder_frame(screener_frame: pd.DataFrame) -> pd.DataFrame:
             "empirical_5y_return",
         ]
     ].copy()
-    total_score = float(portfolio["overall_score"].sum())
-    if total_score <= 0:
-        portfolio["weight"] = 0.0
-    else:
-        portfolio["weight"] = portfolio["overall_score"] / total_score
+    portfolio["weight"] = portfolio_weights(screener_frame, mode)
     return portfolio.rename(columns={"overall_score": "score"})[
-        ["ticker", "score", "weight", "empirical_outlook", "expected_value_5y"]
+        [
+            "ticker",
+            "score",
+            "short_term_opportunity_score",
+            "weight",
+            "opportunity_horizon",
+            "empirical_outlook",
+            "expected_value_5y",
+        ]
     ]
 
 
-def portfolio_builder_summary(screener_frame: pd.DataFrame) -> dict[str, object]:
+def portfolio_builder_summary(
+    screener_frame: pd.DataFrame,
+    mode: str = "Long-Term Portfolio",
+) -> dict[str, object]:
     if screener_frame.empty:
         return {
             "weighted_average_score": 0.0,
             "expected_portfolio_12m_return": 0.0,
             "expected_portfolio_3y_return": 0.0,
             "expected_portfolio_5y_return": 0.0,
+            "portfolio_confidence": 0.0,
+            "portfolio_horizon_classification": "",
             "strongest_holding": "",
             "weakest_holding": "",
         }
-    total_score = float(screener_frame["overall_score"].sum())
-    if total_score <= 0:
-        weights = pd.Series([0.0] * len(screener_frame), index=screener_frame.index)
-    else:
-        weights = screener_frame["overall_score"].astype(float) / total_score
+    weights = portfolio_weights(screener_frame, mode)
+    top_weight_index = weights.sort_values(ascending=False).index[0]
     return {
         "weighted_average_score": float((screener_frame["overall_score"] * weights).sum()),
         "expected_portfolio_12m_return": float(
@@ -485,6 +794,10 @@ def portfolio_builder_summary(screener_frame: pd.DataFrame) -> dict[str, object]
         ),
         "expected_portfolio_5y_return": float(
             (screener_frame["empirical_5y_return"] * weights).sum()
+        ),
+        "portfolio_confidence": float((screener_frame["confidence_pct"] * weights).sum()),
+        "portfolio_horizon_classification": str(
+            screener_frame.loc[top_weight_index, "opportunity_horizon"]
         ),
         "strongest_holding": str(
             screener_frame.sort_values("overall_score", ascending=False).iloc[0]["ticker"]
@@ -638,7 +951,9 @@ def display_empirical_forecast_section(
     tab_validation,
     tab_prediction_accuracy,
     tab_alpha_validation,
+    tab_quality_edge,
     tab_universe,
+    tab_opportunity_finder,
     tab_backtest,
     tab_watchlist,
     tab_portfolio_builder,
@@ -651,7 +966,9 @@ def display_empirical_forecast_section(
         "Validation Dashboard",
         "Prediction Accuracy Dashboard",
         "ALPHA VALIDATION",
+        "Quality of Edge",
         "Universe Backtest",
+        "Opportunity Finder",
         "Backtesting",
         "Watchlist",
         "Portfolio Builder",
@@ -1447,6 +1764,98 @@ with tab_alpha_validation:
         st.caption(ADVICE_WARNING)
 
 
+with tab_quality_edge:
+    quality_universe_text = st.text_area(
+        "Quality universe tickers",
+        value="AAPL, MSFT, META, NVDA, GOOGL, AMZN, PLTR, TSLA",
+    )
+    quality_start = st.text_input("Quality validation start date", value="2018-01-01")
+    quality_max_tickers = st.number_input(
+        "Quality maximum tickers",
+        min_value=1,
+        max_value=100,
+        value=8,
+        step=1,
+    )
+    if st.button("Run quality of edge analysis"):
+        quality_tickers = custom_tickers_from_text(quality_universe_text)[: int(quality_max_tickers)]
+        if not quality_tickers:
+            st.warning("Add at least one ticker.")
+        else:
+            prices, fallback_flags = load_price_histories_for_tickers(
+                quality_tickers,
+                start="2013-01-01",
+            )
+            validation = alpha_validation_frame(
+                prices,
+                start_date=quality_start,
+                fallback_data_used_by_ticker=fallback_flags,
+                step_days=252,
+            )
+            benchmarks = {
+                "S&P 500": benchmark_return_frame(
+                    "S&P 500",
+                    sample_price_history(start="2013-01-01", end="2026-01-01"),
+                    start_date=quality_start,
+                    step_days=252,
+                ),
+                "Nasdaq 100": benchmark_return_frame(
+                    "Nasdaq 100",
+                    sample_price_history(start="2013-01-01", end="2026-01-01"),
+                    start_date=quality_start,
+                    step_days=252,
+                ),
+            }
+            top_decile = top_decile_test(validation, benchmarks)
+            top_20 = top_20_portfolio_test(validation, benchmarks)
+            regime = regime_analysis(validation)
+            false_positive = false_positive_analysis(validation)
+            metrics = quality_of_edge_metrics(validation, benchmarks)
+
+            st.subheader("Quality Verdict")
+            metric_cols = st.columns(4)
+            metric_cols[0].metric("Final Verdict", metrics["final_verdict"])
+            metric_cols[1].metric(
+                "Alpha Consistency Score",
+                f"{metrics['alpha_consistency_score']:.1f}",
+            )
+            metric_cols[2].metric(
+                "Consistency Label",
+                metrics["alpha_consistency_label"],
+            )
+            metric_cols[3].metric(
+                "False Positive Rate",
+                f"{metrics['false_positive_rate_pct']:.1f}%",
+            )
+            evidence_cols = st.columns(4)
+            evidence_cols[0].metric(
+                "Top Decile Alpha",
+                f"{metrics['top_decile_alpha_pct']:.1f}%",
+            )
+            evidence_cols[1].metric(
+                "Top 20 Alpha",
+                f"{metrics['top_20_alpha_pct']:.1f}%",
+            )
+            evidence_cols[2].metric(
+                "Forecast/Actual Correlation",
+                f"{metrics['forecast_actual_correlation']:.2f}",
+            )
+            evidence_cols[3].metric(
+                "Calibration Accuracy",
+                f"{metrics['calibration_accuracy_pct']:.1f}%",
+            )
+
+            st.subheader("Top Decile Performance")
+            st.dataframe(top_decile, use_container_width=True)
+            st.subheader("Top 20 Portfolio Performance")
+            st.dataframe(top_20, use_container_width=True)
+            st.subheader("Regime Analysis")
+            st.dataframe(regime, use_container_width=True)
+            st.subheader("False Positive Analysis")
+            st.dataframe(pd.DataFrame([false_positive]), use_container_width=True)
+            st.caption(ADVICE_WARNING)
+
+
 with tab_universe:
     universe_choice = st.selectbox(
         "Universe",
@@ -1563,6 +1972,133 @@ with tab_universe:
         st.caption(ADVICE_WARNING)
 
 
+with tab_opportunity_finder:
+    opportunity_universe = st.selectbox(
+        "Opportunity universe",
+        ["S&P 500", "Nasdaq 100", "Custom tickers"],
+    )
+    opportunity_custom = st.text_area(
+        "Custom opportunity tickers",
+        value="AAPL,MSFT,META,NVDA,GOOGL,AMZN,PLTR,TSLA",
+    )
+    opportunity_max = st.number_input(
+        "Maximum stocks",
+        min_value=1,
+        max_value=100,
+        value=20,
+        step=1,
+    )
+    opportunity_min_score = st.number_input(
+        "Minimum score",
+        min_value=0.0,
+        max_value=100.0,
+        value=55.0,
+        step=5.0,
+    )
+    opportunity_min_confidence = st.number_input(
+        "Minimum confidence",
+        min_value=0.0,
+        max_value=100.0,
+        value=40.0,
+        step=5.0,
+    )
+    if st.button("Find opportunities"):
+        if opportunity_universe == "S&P 500":
+            opportunity_tickers = get_universe("sp500")
+        elif opportunity_universe == "Nasdaq 100":
+            opportunity_tickers = get_universe("nasdaq100")
+        else:
+            opportunity_tickers = custom_tickers_from_text(opportunity_custom)
+        opportunity_tickers = opportunity_tickers[: int(opportunity_max)]
+        if not opportunity_tickers:
+            st.warning("Add at least one ticker to scan.")
+        else:
+            validation_records = empirical_validation_records(
+                tuple(opportunity_tickers),
+                start_date="2016-01-01",
+                price_start="2013-01-01",
+                step_days=252,
+            )
+            opportunity_frame = score_multiple_tickers(
+                opportunity_tickers,
+                validation_records,
+                min_observations=1,
+                sort_by="master_rank_score",
+            )
+            opportunity_frame = opportunity_finder_results(
+                opportunity_frame,
+                minimum_score=opportunity_min_score,
+                minimum_confidence=opportunity_min_confidence,
+                limit=20,
+            )
+            if opportunity_frame.empty:
+                st.warning("No opportunities matched the current filters.")
+            else:
+                top_cols = st.columns(3)
+                top_cols[0].metric(
+                    "Best Short-Term Opportunity",
+                    opportunity_frame.iloc[0]["ticker"],
+                )
+                top_cols[1].metric(
+                    "Best Long-Term Opportunity",
+                    opportunity_frame.sort_values("overall_score", ascending=False).iloc[0][
+                        "ticker"
+                    ],
+                )
+                top_cols[2].metric(
+                    "Highest Momentum Stock",
+                    opportunity_frame.sort_values(
+                        "momentum_explosion_score",
+                        ascending=False,
+                    ).iloc[0]["ticker"],
+                )
+                more_cols = st.columns(3)
+                more_cols[0].metric(
+                    "Highest Confidence Stock",
+                    opportunity_frame.sort_values("confidence_pct", ascending=False).iloc[0][
+                        "ticker"
+                    ],
+                )
+                more_cols[1].metric(
+                    "Highest Expected 12M Return",
+                    opportunity_frame.sort_values(
+                        "empirical_12m_return",
+                        ascending=False,
+                    ).iloc[0]["ticker"],
+                )
+                more_cols[2].metric(
+                    "Highest Expected 5Y Return",
+                    opportunity_frame.sort_values(
+                        "empirical_5y_return",
+                        ascending=False,
+                    ).iloc[0]["ticker"],
+                )
+
+                st.subheader("Top 20 Opportunities")
+                finder_display = opportunity_frame[
+                    [
+                        "ticker",
+                        "master_rank_score",
+                        "alpha_consistency_score",
+                        "overall_score",
+                        "short_term_opportunity_score",
+                        "momentum_explosion_score",
+                        "opportunity_horizon",
+                        "empirical_1m_return",
+                        "empirical_12m_return",
+                        "confidence_pct",
+                    ]
+                ]
+                st.dataframe(finder_display, use_container_width=True)
+                st.download_button(
+                    "Download Opportunities CSV",
+                    data=opportunity_frame.to_csv(index=False),
+                    file_name="trends_alpha_opportunities.csv",
+                    mime="text/csv",
+                )
+        st.caption(ADVICE_WARNING)
+
+
 with tab_backtest:
     bt_ticker = st.text_input("Backtest ticker", value="MSFT").upper().strip()
     start = st.text_input("Start date", value="2021-01-01")
@@ -1594,7 +2130,15 @@ with tab_portfolio_builder:
         "Portfolio tickers",
         value="AAPL,MSFT,META,NVDA,GOOGL,AMZN",
     )
-    if st.button("Build score-weighted portfolio"):
+    portfolio_mode = st.selectbox(
+        "Portfolio mode",
+        [
+            "Long-Term Portfolio",
+            "Short-Term Opportunity Portfolio",
+            "Balanced Portfolio",
+        ],
+    )
+    if st.button("Build portfolio"):
         builder_tickers = custom_tickers_from_text(builder_input)
         if not builder_tickers:
             st.warning("Enter at least one ticker.")
@@ -1611,8 +2155,8 @@ with tab_portfolio_builder:
                 min_observations=1,
                 sort_by="overall_score",
             )
-            portfolio_frame = portfolio_builder_frame(screener_frame)
-            summary = portfolio_builder_summary(screener_frame)
+            portfolio_frame = portfolio_builder_frame(screener_frame, mode=portfolio_mode)
+            summary = portfolio_builder_summary(screener_frame, mode=portfolio_mode)
 
             summary_cols = st.columns(3)
             summary_cols[0].metric(
@@ -1632,8 +2176,17 @@ with tab_portfolio_builder:
                 "Expected Portfolio 5Y Return",
                 f"{summary['expected_portfolio_5y_return']:.1f}%",
             )
-            holding_cols[1].metric("Strongest Holding", summary["strongest_holding"])
-            holding_cols[2].metric("Weakest Holding", summary["weakest_holding"])
+            holding_cols[1].metric(
+                "Portfolio Confidence",
+                f"{summary['portfolio_confidence']:.1f}%",
+            )
+            holding_cols[2].metric(
+                "Portfolio Horizon",
+                summary["portfolio_horizon_classification"],
+            )
+            strength_cols = st.columns(2)
+            strength_cols[0].metric("Strongest Holding", summary["strongest_holding"])
+            strength_cols[1].metric("Weakest Holding", summary["weakest_holding"])
 
             st.dataframe(
                 portfolio_frame,

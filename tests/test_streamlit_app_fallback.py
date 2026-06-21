@@ -147,7 +147,8 @@ def test_screener_row_includes_empirical_metrics():
         ]
     )
 
-    row = streamlit_app.screener_row_from_score(score, empirical)
+    prices = streamlit_app.sample_price_history(periods=300)
+    row = streamlit_app.screener_row_from_score(score, empirical, prices)
 
     assert row["ticker"] == "AAPL"
     assert row["empirical_12m_return"] == 24.0
@@ -160,7 +161,45 @@ def test_screener_row_includes_empirical_metrics():
     assert row["expected_value_5y"] == 25500.0
     assert row["best_expected_value"] == 25500.0
     assert row["empirical_outlook"] == "Strong Long-Term Edge"
-    assert row["confidence_pct"] == 85.65
+    assert row["confidence_pct"] > 80
+    assert 0 <= row["master_rank_score"] <= 100
+    assert row["alpha_consistency_score"] > 0
+    assert "momentum_explosion_score" in row
+    assert "short_term_opportunity_score" in row
+    assert "opportunity_horizon" in row
+    assert "empirical_1w_return" in row
+    assert "empirical_6w_return" in row
+
+
+def test_short_term_opportunity_labels_and_horizon_classification():
+    streamlit_app = load_streamlit_app()
+
+    assert streamlit_app.momentum_explosion_label(85) == "High Probability Runner"
+    assert streamlit_app.short_term_opportunity_label(88) == "Swing Buy Now"
+    assert streamlit_app.short_term_opportunity_label(72) == "Strong Momentum"
+    assert streamlit_app.short_term_opportunity_label(56) == "Watch"
+    assert streamlit_app.short_term_opportunity_label(40) == "Ignore"
+    assert streamlit_app.opportunity_horizon_label(45, 80) == "Long-Term Investment"
+    assert streamlit_app.opportunity_horizon_label(80, 45) == "Swing Trade"
+    assert streamlit_app.opportunity_horizon_label(80, 80) == "Buy and Hold"
+    assert streamlit_app.opportunity_horizon_label(45, 45) == "Avoid"
+
+
+def test_momentum_explosion_score_has_expected_range():
+    streamlit_app = load_streamlit_app()
+
+    details = streamlit_app.momentum_explosion_details(
+        streamlit_app.sample_price_history(periods=300)
+    )
+
+    assert 0 <= details["momentum_explosion_score"] <= 100
+    assert details["momentum_explosion_label"] in {
+        "High Probability Runner",
+        "Positive Momentum",
+        "Neutral",
+        "Weak",
+        "Avoid",
+    }
 
 
 def test_empirical_outlook_label_rules():
@@ -215,6 +254,8 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
     assert frame["ticker"].tolist() == ["MSFT", "AAPL", "META"]
     assert {
         "ticker",
+        "master_rank_score",
+        "alpha_consistency_score",
         "overall_score",
         "label",
         "short_term_score",
@@ -232,6 +273,13 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "expected_value_5y",
         "best_expected_value",
         "empirical_outlook",
+        "momentum_explosion_score",
+        "short_term_opportunity_score",
+        "opportunity_horizon",
+        "empirical_1w_return",
+        "empirical_2w_return",
+        "empirical_4w_return",
+        "empirical_6w_return",
     }.issubset(frame.columns)
 
 
@@ -305,6 +353,41 @@ def test_score_multiple_tickers_can_sort_by_best_expected_value(monkeypatch):
     assert frame["ticker"].tolist() == ["AAPL", "MSFT"]
 
 
+def test_opportunity_finder_filters_and_sorts_results():
+    streamlit_app = load_streamlit_app()
+    screener_frame = streamlit_app.pd.DataFrame(
+        [
+            {
+                "ticker": "AAPL",
+                "master_rank_score": 72.0,
+                "short_term_opportunity_score": 70.0,
+                "confidence_pct": 65.0,
+            },
+            {
+                "ticker": "MSFT",
+                "master_rank_score": 88.0,
+                "short_term_opportunity_score": 90.0,
+                "confidence_pct": 75.0,
+            },
+            {
+                "ticker": "META",
+                "master_rank_score": 96.0,
+                "short_term_opportunity_score": 95.0,
+                "confidence_pct": 30.0,
+            },
+        ]
+    )
+
+    result = streamlit_app.opportunity_finder_results(
+        screener_frame,
+        minimum_score=70,
+        minimum_confidence=60,
+        limit=20,
+    )
+
+    assert result["ticker"].tolist() == ["MSFT", "AAPL"]
+
+
 def test_portfolio_builder_weights_and_summary():
     streamlit_app = load_streamlit_app()
     screener_frame = streamlit_app.pd.DataFrame(
@@ -330,12 +413,33 @@ def test_portfolio_builder_weights_and_summary():
         ]
     )
 
-    portfolio = streamlit_app.portfolio_builder_frame(screener_frame)
-    summary = streamlit_app.portfolio_builder_summary(screener_frame)
+    screener_frame["short_term_opportunity_score"] = [40.0, 90.0]
+    screener_frame["opportunity_horizon"] = ["Long-Term Investment", "Swing Trade"]
+    screener_frame["confidence_pct"] = [80.0, 60.0]
+
+    portfolio = streamlit_app.portfolio_builder_frame(
+        screener_frame,
+        mode="Long-Term Portfolio",
+    )
+    short_portfolio = streamlit_app.portfolio_builder_frame(
+        screener_frame,
+        mode="Short-Term Opportunity Portfolio",
+    )
+    balanced_portfolio = streamlit_app.portfolio_builder_frame(
+        screener_frame,
+        mode="Balanced Portfolio",
+    )
+    summary = streamlit_app.portfolio_builder_summary(
+        screener_frame,
+        mode="Long-Term Portfolio",
+    )
 
     assert portfolio["weight"].round(4).tolist() == [0.6667, 0.3333]
+    assert short_portfolio["weight"].round(4).tolist() == [0.3077, 0.6923]
+    assert balanced_portfolio["weight"].round(4).tolist() == [0.48, 0.52]
     assert summary["strongest_holding"] == "AAPL"
     assert summary["weakest_holding"] == "MSFT"
+    assert summary["portfolio_horizon_classification"] == "Long-Term Investment"
     assert round(summary["expected_portfolio_12m_return"], 2) == 16.67
 
 

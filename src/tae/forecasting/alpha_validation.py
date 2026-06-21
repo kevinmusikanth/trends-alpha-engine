@@ -9,9 +9,23 @@ from tae.forecasting.engine import build_forecast_report
 from tae.forecasting.universe import UNIVERSE_SCORE_BUCKETS, score_bucket_20_point
 from tae.scoring.engine import score_ticker
 
-ALPHA_HORIZONS = ["1 week", "1 month", "3 months", "6 months", "12 months", "3 years", "5 years"]
+ALPHA_HORIZONS = [
+    "1 week",
+    "2 weeks",
+    "4 weeks",
+    "6 weeks",
+    "1 month",
+    "3 months",
+    "6 months",
+    "12 months",
+    "3 years",
+    "5 years",
+]
 ALPHA_HORIZON_DAYS = {
     "1 week": 5,
+    "2 weeks": 10,
+    "4 weeks": 20,
+    "6 weeks": 30,
     "1 month": 21,
     "3 months": 63,
     "6 months": 126,
@@ -21,6 +35,9 @@ ALPHA_HORIZON_DAYS = {
 }
 FORECAST_HORIZON_MAP = {
     "1 week": ("1 week", 0.019, False),
+    "2 weeks": ("1 month", 10 / 21, False),
+    "4 weeks": ("1 month", 20 / 21, False),
+    "6 weeks": ("1 month", 30 / 21, False),
     "1 month": ("1 month", 1 / 12, False),
     "3 months": ("3 months", 0.25, False),
     "6 months": ("6 months", 0.5, False),
@@ -111,6 +128,8 @@ def predicted_return_for_horizon(report, horizon: str) -> float:
     rate = forecast.base_case_pct / 100
     if is_cagr:
         return float((1 + rate) ** years - 1)
+    if horizon in {"2 weeks", "4 weeks", "6 weeks"}:
+        return float(rate * years)
     return float(rate)
 
 
@@ -294,6 +313,9 @@ def annualized_return(total_return: float, years: float) -> float:
 def horizon_years(horizon: str) -> float:
     return {
         "1 week": 5 / 252,
+        "2 weeks": 10 / 252,
+        "4 weeks": 20 / 252,
+        "6 weeks": 30 / 252,
         "1 month": 1 / 12,
         "3 months": 0.25,
         "6 months": 0.5,
