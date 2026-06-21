@@ -176,10 +176,25 @@ def test_empirical_investment_outcome_table_uses_core_horizons():
         min_observations=1,
     )
 
-    table = empirical_investment_outcome_table(forecast)
+    table = empirical_investment_outcome_table(
+        forecast,
+        investment_amount=10000,
+        currency="$",
+    )
+    one_month = table[table["horizon"] == "1 month"].iloc[0]
+    expected_value = 10000 * (1 + one_month["average_return_pct"] / 100)
 
     assert table["horizon"].tolist() == ["1 month", "3 months", "12 months", "3 years", "5 years"]
-    assert {"expected_value", "observation_count", "win_rate_pct"}.issubset(table.columns)
+    assert {
+        "horizon",
+        "average_return_pct",
+        "win_rate_pct",
+        "observation_count",
+        "expected_value",
+        "currency",
+    }.issubset(table.columns)
+    assert one_month["expected_value"] == expected_value
+    assert table["currency"].eq("$").all()
     assert table["expected_value"].gt(0).all()
 
 

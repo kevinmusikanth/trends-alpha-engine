@@ -127,37 +127,34 @@ def empirical_fallback_message(empirical_forecast: pd.DataFrame) -> str:
 
 def empirical_investment_outcome_table(
     empirical_forecast: pd.DataFrame,
+    investment_amount: float = 10.0,
+    currency: str = "$",
     horizons: list[str] | None = None,
 ) -> pd.DataFrame:
+    columns = [
+        "horizon",
+        "average_return_pct",
+        "win_rate_pct",
+        "observation_count",
+        "expected_value",
+        "currency",
+    ]
     if empirical_forecast.empty:
-        return pd.DataFrame(
-            columns=[
-                "horizon",
-                "expected_value",
-                "observation_count",
-                "win_rate_pct",
-                "average_return_pct",
-                "confidence",
-            ]
-        )
+        return pd.DataFrame(columns=columns)
 
     selected_horizons = horizons or CORE_OUTCOME_HORIZONS
     table = empirical_forecast[
         empirical_forecast["horizon"].isin(selected_horizons)
     ].copy()
+    table["expected_value"] = investment_amount * (
+        1 + table["average_return_pct"].astype(float) / 100
+    )
+    table["currency"] = currency
     table["horizon"] = pd.Categorical(
         table["horizon"],
         categories=selected_horizons,
         ordered=True,
     )
-    columns = [
-        "horizon",
-        "expected_value",
-        "observation_count",
-        "win_rate_pct",
-        "average_return_pct",
-        "confidence",
-    ]
     return table.sort_values("horizon")[columns].reset_index(drop=True)
 
 

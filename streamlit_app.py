@@ -336,7 +336,11 @@ def display_empirical_forecast_section(
         "Expected values use historical average returns from the current score bucket, "
         "not theoretical forecast percentages."
     )
-    outcome_display = empirical_investment_outcome_table(empirical)
+    outcome_display = empirical_investment_outcome_table(
+        empirical,
+        investment_amount=investment_amount,
+        currency=currency,
+    )
     if outcome_display.empty:
         st.warning("No empirical investment outcomes available for this score bucket.")
     else:
