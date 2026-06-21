@@ -83,8 +83,16 @@ SCREENER_SORT_OPTIONS = [
     "empirical_2w_return",
     "empirical_4w_return",
     "empirical_6w_return",
+    "empirical_3m_return",
+    "empirical_6m_return",
     "empirical_win_rate",
     "confidence_pct",
+    "trading_score",
+    "trading_expected_return",
+    "swing_score",
+    "swing_expected_return",
+    "compounder_score",
+    "compounder_expected_return",
     "recommended_horizon_score",
     "risk_adjusted_return",
     "best_expected_value",
@@ -512,6 +520,130 @@ def expected_return_range(return_pct: float) -> str:
     return f"{low:.1f}% to {high:.1f}%"
 
 
+def action_from_score(score: float, strong_label: str) -> str:
+    if score >= 80:
+        return strong_label
+    if score >= 65:
+        return "Buy"
+    if score >= 50:
+        return "Watchlist"
+    return "Avoid"
+
+
+def best_horizon_from_metrics(horizon_metrics: dict[str, tuple[float, float]]) -> tuple[str, float, float]:
+    if not horizon_metrics:
+        return "Insufficient evidence", 0.0, 0.0
+    horizon, values = max(
+        horizon_metrics.items(),
+        key=lambda item: item[1][0] * max(item[1][1], 0.0),
+    )
+    return horizon, float(values[0]), float(values[1])
+
+
+def trading_advisory_fields(row: dict[str, object]) -> dict[str, object]:
+    horizon, expected_return, win_rate = best_horizon_from_metrics(
+        {
+            "1 week": (
+                float(row.get("empirical_1w_return", 0.0)),
+                float(row.get("empirical_1w_win_rate", 0.0)),
+            ),
+            "2 weeks": (
+                float(row.get("empirical_2w_return", 0.0)),
+                float(row.get("empirical_2w_win_rate", 0.0)),
+            ),
+            "4 weeks": (
+                float(row.get("empirical_4w_return", 0.0)),
+                float(row.get("empirical_4w_win_rate", 0.0)),
+            ),
+        }
+    )
+    momentum_score = float(row.get("momentum_explosion_score", 0.0))
+    confidence_pct = float(row.get("confidence_pct", 0.0))
+    score_value = (
+        max(0.0, expected_return) * 3.0
+        + win_rate * 0.30
+        + momentum_score * 0.35
+        + confidence_pct * 0.20
+    )
+    trading_score = round(max(0.0, min(100.0, score_value)), 2)
+    return {
+        "trading_score": trading_score,
+        "trading_action": action_from_score(trading_score, "Trading Buy"),
+        "trading_horizon": horizon,
+        "trading_expected_return": round(expected_return, 2),
+        "trading_win_rate": round(win_rate, 2),
+        "trading_expected_return_range": expected_return_range(expected_return),
+    }
+
+
+def swing_advisory_fields(row: dict[str, object]) -> dict[str, object]:
+    horizon, expected_return, win_rate = best_horizon_from_metrics(
+        {
+            "3 months": (
+                float(row.get("empirical_3m_return", 0.0)),
+                float(row.get("empirical_3m_win_rate", 0.0)),
+            ),
+            "6 months": (
+                float(row.get("empirical_6m_return", 0.0)),
+                float(row.get("empirical_6m_win_rate", 0.0)),
+            ),
+        }
+    )
+    confidence_pct = float(row.get("confidence_pct", 0.0))
+    score_value = (
+        max(0.0, expected_return) * 2.0
+        + win_rate * 0.45
+        + confidence_pct * 0.30
+    )
+    swing_score = round(max(0.0, min(100.0, score_value)), 2)
+    return {
+        "swing_score": swing_score,
+        "swing_action": action_from_score(swing_score, "Swing Buy"),
+        "swing_horizon": horizon,
+        "swing_expected_return": round(expected_return, 2),
+        "swing_win_rate": round(win_rate, 2),
+        "swing_expected_return_range": expected_return_range(expected_return),
+    }
+
+
+def compounder_advisory_fields(row: dict[str, object]) -> dict[str, object]:
+    horizon, expected_return, win_rate = best_horizon_from_metrics(
+        {
+            "12 months": (
+                float(row.get("empirical_12m_return", 0.0)),
+                float(row.get("empirical_win_rate", 0.0)),
+            ),
+            "3 years": (
+                float(row.get("empirical_3y_return", 0.0)),
+                float(row.get("empirical_3y_win_rate", 0.0)),
+            ),
+            "5 years": (
+                float(row.get("empirical_5y_return", 0.0)),
+                float(row.get("empirical_5y_win_rate", 0.0)),
+            ),
+        }
+    )
+    master_score = float(row.get("master_rank_score", 0.0))
+    alpha_consistency = float(row.get("alpha_consistency_score", 0.0))
+    confidence_pct = float(row.get("confidence_pct", 0.0))
+    return_score = min(100.0, max(0.0, expected_return) / 3.0)
+    score_value = (
+        return_score * 0.35
+        + master_score * 0.30
+        + alpha_consistency * 0.20
+        + confidence_pct * 0.15
+    )
+    compounder_score = round(max(0.0, min(100.0, score_value)), 2)
+    return {
+        "compounder_score": compounder_score,
+        "compounder_action": action_from_score(compounder_score, "Compounder Buy"),
+        "compounder_horizon": horizon,
+        "compounder_expected_return": round(expected_return, 2),
+        "compounder_win_rate": round(win_rate, 2),
+        "compounder_expected_return_range": expected_return_range(expected_return),
+    }
+
+
 def advisory_horizon_group(horizon: str) -> str:
     if horizon in {"1 week", "2 weeks", "4 weeks", "6 weeks"}:
         return "short-term"
@@ -790,6 +922,26 @@ def screener_row_from_score(
         "1 month",
         "win_rate_pct",
     )
+    empirical_3m_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "3 months",
+        "average_return_pct",
+    )
+    empirical_3m_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "3 months",
+        "win_rate_pct",
+    )
+    empirical_6m_return = empirical_metric_for_horizon(
+        empirical_forecast,
+        "6 months",
+        "average_return_pct",
+    )
+    empirical_6m_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "6 months",
+        "win_rate_pct",
+    )
     empirical_12m_return = empirical_metric_for_horizon(
         empirical_forecast,
         "12 months",
@@ -804,6 +956,16 @@ def screener_row_from_score(
         empirical_forecast,
         "5 years",
         "average_return_pct",
+    )
+    empirical_3y_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "3 years",
+        "win_rate_pct",
+    )
+    empirical_5y_win_rate = empirical_metric_for_horizon(
+        empirical_forecast,
+        "5 years",
+        "win_rate_pct",
     )
     empirical_win_rate = empirical_metric_for_horizon(
         empirical_forecast,
@@ -832,7 +994,7 @@ def screener_row_from_score(
         empirical_12m_return,
         empirical_5y_return,
     )
-    return {
+    result = {
         "ticker": score.ticker,
         "master_rank_score": master_score,
         "alpha_consistency_score": alpha_consistency,
@@ -861,9 +1023,15 @@ def screener_row_from_score(
         "empirical_6w_win_rate": empirical_6w_win_rate,
         "empirical_1m_return": empirical_1m_return,
         "empirical_1m_win_rate": empirical_1m_win_rate,
+        "empirical_3m_return": empirical_3m_return,
+        "empirical_3m_win_rate": empirical_3m_win_rate,
+        "empirical_6m_return": empirical_6m_return,
+        "empirical_6m_win_rate": empirical_6m_win_rate,
         "empirical_12m_return": empirical_12m_return,
         "empirical_3y_return": empirical_3y_return,
+        "empirical_3y_win_rate": empirical_3y_win_rate,
         "empirical_5y_return": empirical_5y_return,
+        "empirical_5y_win_rate": empirical_5y_win_rate,
         "empirical_win_rate": empirical_win_rate,
         "confidence_pct": confidence_pct,
         "best_holding_period": best_holding_period_from_returns(
@@ -885,6 +1053,10 @@ def screener_row_from_score(
             empirical_win_rate,
         ),
     }
+    result.update(trading_advisory_fields(result))
+    result.update(swing_advisory_fields(result))
+    result.update(compounder_advisory_fields(result))
+    return result
 
 
 def sort_screener_frame(frame: pd.DataFrame, sort_by: str) -> pd.DataFrame:
@@ -2371,7 +2543,7 @@ with tab_advisory:
                 validation_records,
                 min_observations=int(advisory_min_observations),
                 sort_by="advisory_score",
-            ).head(10)
+            )
             if advisory_frame.empty:
                 st.warning("No advisory results were generated.")
             else:
@@ -2404,11 +2576,110 @@ with tab_advisory:
                     }
                 )
                 st.dataframe(display, use_container_width=True)
-                st.subheader("Top 10 Opportunities")
+                st.subheader("Top Trading Opportunities")
+                trading_frame = sort_screener_frame(
+                    advisory_frame,
+                    "trading_score",
+                ).head(10)
+                trading_display = trading_frame[
+                    [
+                        "ticker",
+                        "trading_action",
+                        "trading_expected_return_range",
+                        "trading_win_rate",
+                        "confidence_level",
+                        "trading_horizon",
+                        "trading_score",
+                    ]
+                ].rename(
+                    columns={
+                        "ticker": "Ticker",
+                        "trading_action": "Recommendation",
+                        "trading_expected_return_range": "Expected Return Range",
+                        "trading_win_rate": "Historical Win Rate",
+                        "confidence_level": "Confidence",
+                        "trading_horizon": "Suggested Holding Period",
+                        "trading_score": "Trading Score",
+                    }
+                )
+                st.dataframe(trading_display, use_container_width=True)
+                st.download_button(
+                    "Download Trading Advisory CSV",
+                    data=trading_frame.to_csv(index=False),
+                    file_name="trends_alpha_trading_advisory.csv",
+                    mime="text/csv",
+                )
+
+                st.subheader("Top Swing Opportunities")
+                swing_frame = sort_screener_frame(advisory_frame, "swing_score").head(10)
+                swing_display = swing_frame[
+                    [
+                        "ticker",
+                        "swing_action",
+                        "swing_expected_return_range",
+                        "swing_win_rate",
+                        "confidence_level",
+                        "swing_horizon",
+                        "swing_score",
+                    ]
+                ].rename(
+                    columns={
+                        "ticker": "Ticker",
+                        "swing_action": "Recommendation",
+                        "swing_expected_return_range": "Expected Return Range",
+                        "swing_win_rate": "Historical Win Rate",
+                        "confidence_level": "Confidence",
+                        "swing_horizon": "Suggested Holding Period",
+                        "swing_score": "Swing Score",
+                    }
+                )
+                st.dataframe(swing_display, use_container_width=True)
+                st.download_button(
+                    "Download Swing Advisory CSV",
+                    data=swing_frame.to_csv(index=False),
+                    file_name="trends_alpha_swing_advisory.csv",
+                    mime="text/csv",
+                )
+
+                st.subheader("Top Long-Term Compounders")
+                compounder_frame = sort_screener_frame(
+                    advisory_frame,
+                    "compounder_score",
+                ).head(10)
+                compounder_display = compounder_frame[
+                    [
+                        "ticker",
+                        "compounder_action",
+                        "compounder_expected_return_range",
+                        "compounder_win_rate",
+                        "confidence_level",
+                        "compounder_horizon",
+                        "compounder_score",
+                    ]
+                ].rename(
+                    columns={
+                        "ticker": "Ticker",
+                        "compounder_action": "Recommendation",
+                        "compounder_expected_return_range": "Expected Return Range",
+                        "compounder_win_rate": "Historical Win Rate",
+                        "confidence_level": "Confidence",
+                        "compounder_horizon": "Suggested Holding Period",
+                        "compounder_score": "Compounder Score",
+                    }
+                )
+                st.dataframe(compounder_display, use_container_width=True)
+                st.download_button(
+                    "Download Compounder Advisory CSV",
+                    data=compounder_frame.to_csv(index=False),
+                    file_name="trends_alpha_compounder_advisory.csv",
+                    mime="text/csv",
+                )
+
+                st.subheader("Top 10 Blended Advisory Summaries")
                 for summary in advisory_frame["advisory_summary"].head(10):
                     st.write(summary)
                 st.download_button(
-                    "Download Advisory CSV",
+                    "Download Blended Advisory CSV",
                     data=advisory_frame.to_csv(index=False),
                     file_name="trends_alpha_research_advisory.csv",
                     mime="text/csv",

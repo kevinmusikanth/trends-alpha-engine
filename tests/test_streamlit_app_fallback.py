@@ -187,6 +187,20 @@ def test_screener_row_includes_empirical_metrics():
     assert "opportunity_horizon" in row
     assert "empirical_1w_return" in row
     assert "empirical_6w_return" in row
+    assert "empirical_3m_return" in row
+    assert "empirical_6m_return" in row
+    assert "trading_score" in row
+    assert "trading_action" in row
+    assert "trading_horizon" in row
+    assert "trading_expected_return" in row
+    assert "swing_score" in row
+    assert "swing_action" in row
+    assert "swing_horizon" in row
+    assert "swing_expected_return" in row
+    assert "compounder_score" in row
+    assert "compounder_action" in row
+    assert "compounder_horizon" in row
+    assert "compounder_expected_return" in row
     assert row["advisory_score"] > 0
     assert "recommended_horizon_score" in row
     assert "risk_adjusted_return" in row
@@ -202,6 +216,47 @@ def test_screener_row_includes_empirical_metrics():
     assert row["historical_win_rate"] > 0
     assert row["confidence_level"] in {"High", "Good", "Moderate", "Low"}
     assert "Research indicates AAPL" in row["advisory_summary"]
+
+
+def test_multi_horizon_advisory_fields_are_independent():
+    streamlit_app = load_streamlit_app()
+    base_row = {
+        "empirical_1w_return": 3.0,
+        "empirical_2w_return": 5.0,
+        "empirical_4w_return": 4.0,
+        "empirical_1w_win_rate": 60.0,
+        "empirical_2w_win_rate": 62.0,
+        "empirical_4w_win_rate": 58.0,
+        "empirical_3m_return": 9.0,
+        "empirical_6m_return": 14.0,
+        "empirical_3m_win_rate": 63.0,
+        "empirical_6m_win_rate": 66.0,
+        "empirical_12m_return": 20.0,
+        "empirical_3y_return": 80.0,
+        "empirical_5y_return": 500.0,
+        "empirical_win_rate": 70.0,
+        "empirical_3y_win_rate": 82.0,
+        "empirical_5y_win_rate": 88.0,
+        "momentum_explosion_score": 90.0,
+        "master_rank_score": 75.0,
+        "alpha_consistency_score": 78.0,
+        "confidence_pct": 72.0,
+    }
+
+    trading = streamlit_app.trading_advisory_fields(base_row)
+    swing = streamlit_app.swing_advisory_fields(base_row)
+    compounder = streamlit_app.compounder_advisory_fields(base_row)
+
+    assert trading["trading_horizon"] == "2 weeks"
+    assert trading["trading_expected_return"] == 5.0
+    assert swing["swing_horizon"] == "6 months"
+    assert swing["swing_expected_return"] == 14.0
+    assert compounder["compounder_horizon"] == "5 years"
+    assert compounder["compounder_expected_return"] == 500.0
+
+    changed_long_term = {**base_row, "empirical_5y_return": 5_000.0}
+    assert streamlit_app.trading_advisory_fields(changed_long_term) == trading
+    assert streamlit_app.swing_advisory_fields(changed_long_term) == swing
 
 
 def test_short_term_opportunity_labels_and_horizon_classification():
@@ -442,6 +497,20 @@ def test_score_multiple_tickers_returns_sorted_screener_frame(monkeypatch):
         "empirical_2w_return",
         "empirical_4w_return",
         "empirical_6w_return",
+        "empirical_3m_return",
+        "empirical_6m_return",
+        "trading_score",
+        "trading_action",
+        "trading_horizon",
+        "trading_expected_return",
+        "swing_score",
+        "swing_action",
+        "swing_horizon",
+        "swing_expected_return",
+        "compounder_score",
+        "compounder_action",
+        "compounder_horizon",
+        "compounder_expected_return",
     }.issubset(frame.columns)
 
 
